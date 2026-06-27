@@ -196,6 +196,61 @@ extension LSPHover: Decodable {
     }
 }
 
+/// A `$/progress` notification carrying LSP work-done progress. `sourcekit-lsp`
+/// streams these for background indexing: one `.begin` (with a `title` like
+/// "Indexing"), zero or more `.report` updates (`message` and/or `percentage`),
+/// then one `.end`. The `token` ties a sequence together; `value.kind`
+/// discriminates the stage.
+public struct LSPProgress: Sendable {
+    public enum Stage: String, Sendable { case begin, report, end }
+
+    /// The progress token, stringified (the wire allows a string *or* a number).
+    public var token: String
+    public var stage: Stage
+    /// The operation name — present on `.begin` (e.g. "Indexing").
+    public var title: String?
+    /// A human-readable detail (e.g. "3/42"), when the server sends one.
+    public var message: String?
+    /// Completion 0–100, when the server reports a determinate amount.
+    public var percentage: Int?
+
+    public init(
+        token: String, stage: Stage, title: String? = nil,
+        message: String? = nil, percentage: Int? = nil
+    ) {
+        self.token = token
+        self.stage = stage
+        self.title = title
+        self.message = message
+        self.percentage = percentage
+    }
+}
+
+extension LSPProgress: Decodable {
+    private enum CodingKeys: String, CodingKey { case token, value }
+    private enum ValueKeys: String, CodingKey { case kind, title, message, percentage }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // `token`: `ProgressToken` is `string | integer` on the wire.
+        if let text = try? container.decode(String.self, forKey: .token) {
+            self.token = text
+        } else {
+            self.token = String(try container.decode(Int.self, forKey: .token))
+        }
+
+        let value = try container.nestedContainer(keyedBy: ValueKeys.self, forKey: .value)
+        guard let stage = Stage(rawValue: try value.decode(String.self, forKey: .kind)) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: value, debugDescription: "unknown progress kind")
+        }
+        self.stage = stage
+        self.title = try value.decodeIfPresent(String.self, forKey: .title)
+        self.message = try value.decodeIfPresent(String.self, forKey: .message)
+        self.percentage = try value.decodeIfPresent(Int.self, forKey: .percentage)
+    }
+}
+
 /// `initialize` result: what the server can do, and who it is.
 public struct LSPInitializeResult: Sendable {
     /// The names of the capabilities the server advertised (e.g.

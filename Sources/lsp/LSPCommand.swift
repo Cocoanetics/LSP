@@ -63,11 +63,13 @@ struct LSPCommand {
         let root = enclosingProjectRoot(for: absolute(target))
 
         let client = try LSPClient(launch: LSPServer.sourceKit())
+        let indexing = IndexingMonitor()
+        await client.setProgressHandler { indexing.handle($0) }
         await client.start()
         _ = try await client.initialize(rootURI: LSPURI.file(root))
         try await client.initialized()
 
-        let matches = try await searchWaitingForIndex(client, query: query)
+        let matches = try await searchWaitingForIndex(client, query: query, indexing: indexing)
         if matches.isEmpty {
             print("(no symbols matching \"\(query)\")")
         } else {
@@ -77,23 +79,34 @@ struct LSPCommand {
     }
 
     /// `workspace/symbol` reads the background index, which builds asynchronously
-    /// after `initialize`. Retry on an empty result — a few short waits — so a cold
-    /// project gets a chance to index before we conclude "no matches". A genuinely
-    /// absent symbol just costs the full (bounded) wait.
+    /// after `initialize`. Rather than guess a timeout, we follow `sourcekit-lsp`'s
+    /// own `$/progress`: try the warm index first, and if that's empty, wait for the
+    /// `Indexing` token to *finish* (rendering a bar) before deciding. A short tail
+    /// of retries covers the brief lag between the `end` event and the index being
+    /// queryable.
     static func searchWaitingForIndex(
-        _ client: LSPClient, query: String, attempts: Int = 12, delayMilliseconds: UInt64 = 500
+        _ client: LSPClient, query: String, indexing: IndexingMonitor
     ) async throws -> [LSPSymbolInformation] {
-        for attempt in 1...attempts {
-            // Drop compiler-synthesized symbols (mangled `$s…` names from macro
-            // expansions like Swift Testing's `@Test`) — never useful to a reader.
-            let matches = try await client.workspaceSymbol(query)
-                .filter { !$0.name.hasPrefix("$") }
-            if !matches.isEmpty { return matches }
-            if attempt < attempts {
-                try await Task.sleep(nanoseconds: delayMilliseconds * 1_000_000)
-            }
+        // Fast path: a warm index answers immediately.
+        if let hit = try await matchingSymbols(client, query: query) { return hit }
+
+        // Cold path: let background indexing begin (brief grace) and finish.
+        await indexing.waitUntilSettled(graceMilliseconds: 1_500, capMilliseconds: 180_000)
+
+        // The index can lag the `end` event slightly — a few short retries cover it.
+        for _ in 0..<6 {
+            if let hit = try await matchingSymbols(client, query: query) { return hit }
+            try await Task.sleep(nanoseconds: 300 * 1_000_000)
         }
         return []
+    }
+
+    /// One `workspace/symbol` call, dropping compiler-synthesized symbols (mangled
+    /// `$s…` names from macro expansions like Swift Testing's `@Test`). Returns
+    /// `nil` for "no matches" so callers can distinguish it from `[]`-as-sentinel.
+    static func matchingSymbols(_ client: LSPClient, query: String) async throws -> [LSPSymbolInformation]? {
+        let matches = try await client.workspaceSymbol(query).filter { !$0.name.hasPrefix("$") }
+        return matches.isEmpty ? nil : matches
     }
 
     /// Reproduce the POC: handshake, open the file, print its symbol tree.
@@ -216,5 +229,99 @@ struct LSPCommand {
 
         Lines and columns are 0-based; columns are UTF-16 offsets (LSP convention).
         """)
+    }
+}
+
+/// Renders `sourcekit-lsp`'s background-indexing `$/progress` as a progress bar and
+/// tracks when indexing settles, so a query can wait for a real signal instead of a
+/// guessed timeout.
+///
+/// `sourcekit-lsp` runs several progress tokens at once (indexing, package
+/// reloading, …); this watches only the one whose `.begin` is titled "Indexing".
+/// The bar is drawn on **stderr**, and **only when stderr is a TTY** — piped output
+/// (and the eventual MCP server / an LLM consumer) stays free of `\r` redraw noise
+/// while results flow cleanly on stdout. State is guarded by a lock because the
+/// progress handler is a synchronous `@Sendable` callback invoked off the client.
+final class IndexingMonitor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var indexingToken: String?
+    private var started = false
+    private var ended = false
+    private let isTTY = isatty(STDERR_FILENO) != 0
+    private let barWidth = 24
+
+    /// Feed a `$/progress` notification. Safe to call from the client's handler.
+    func handle(_ progress: LSPProgress) {
+        lock.lock(); defer { lock.unlock() }
+        switch progress.stage {
+        case .begin where progress.title?.hasPrefix("Indexing") == true:
+            indexingToken = progress.token
+            started = true
+            ended = false
+            render(progress)
+        case .report where progress.token == indexingToken:
+            render(progress)
+        case .end where progress.token == indexingToken:
+            ended = true
+            clearLine()
+        default:
+            break // other tokens (package reload, …) and pre-begin reports: ignore.
+        }
+    }
+
+    /// Wait for indexing to finish. First waits up to `graceMilliseconds` for an
+    /// `Indexing` `.begin` (none ⇒ the index is warm, return at once); then waits up
+    /// to `capMilliseconds` for its `.end`.
+    func waitUntilSettled(graceMilliseconds: Int, capMilliseconds: Int) async {
+        var waited = 0
+        while !flag(\.started) && waited < graceMilliseconds {
+            try? await Task.sleep(nanoseconds: 100 * 1_000_000)
+            waited += 100
+        }
+        guard flag(\.started) else { return } // warm index — nothing to wait for.
+
+        var capWaited = 0
+        while !flag(\.ended) && capWaited < capMilliseconds {
+            try? await Task.sleep(nanoseconds: 200 * 1_000_000)
+            capWaited += 200
+        }
+    }
+
+    // MARK: - Rendering (called under `lock`)
+
+    private func render(_ progress: LSPProgress) {
+        guard isTTY else { return }
+        let percent = progress.percentage ?? Self.percent(fromMessage: progress.message) ?? 0
+        let clamped = max(0, min(100, percent))
+        let filled = barWidth * clamped / 100
+        let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: barWidth - filled)
+        let detail = progress.message.map { "  \($0)" } ?? ""
+        write("\rIndexing [\(bar)] \(clamped)%\(detail)\u{1B}[K")
+    }
+
+    private func clearLine() {
+        guard isTTY else { return }
+        write("\r\u{1B}[K")
+    }
+
+    private func write(_ text: String) {
+        FileHandle.standardError.write(Data(text.utf8))
+    }
+
+    private func flag(_ keyPath: KeyPath<IndexingMonitor, Bool>) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return self[keyPath: keyPath]
+    }
+
+    /// Parse a `"30 / 48"`-style count into a 0–100 percentage (the server sends
+    /// this even when the explicit `percentage` field is absent).
+    private static func percent(fromMessage message: String?) -> Int? {
+        guard let message else { return nil }
+        let parts = message.split(separator: "/")
+        guard parts.count == 2,
+              let done = Int(parts[0].trimmingCharacters(in: .whitespaces)),
+              let total = Int(parts[1].trimmingCharacters(in: .whitespaces)),
+              total > 0 else { return nil }
+        return done * 100 / total
     }
 }

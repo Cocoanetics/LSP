@@ -38,6 +38,7 @@ public actor LSPClient {
     private let transport: ProcessTransport<ContentLengthFraming>
     private var logHandler: (@Sendable (LSPLogMessage) -> Void)?
     private var diagnosticsHandler: (@Sendable (LSPPublishDiagnostics) -> Void)?
+    private var progressHandler: (@Sendable (LSPProgress) -> Void)?
 
     /// Spawn `launch` and build the peer over a `Content-Length`-framed stdio
     /// transport. Throws if the server process can't be launched.
@@ -60,6 +61,13 @@ public actor LSPClient {
     /// server pushes for open documents. Pass `nil` to stop.
     public func setDiagnosticsHandler(_ handler: (@Sendable (LSPPublishDiagnostics) -> Void)?) {
         diagnosticsHandler = handler
+    }
+
+    /// Observe `$/progress` work-done progress — `sourcekit-lsp` streams these for
+    /// background indexing (begin → report* → end), with a percentage when it knows
+    /// one. Drive a progress bar from this. Pass `nil` to stop.
+    public func setProgressHandler(_ handler: (@Sendable (LSPProgress) -> Void)?) {
+        progressHandler = handler
     }
 
     /// Begin reading inbound messages. Call once, before `initialize`.
@@ -97,7 +105,10 @@ public actor LSPClient {
                     "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
                     "hover": ["contentFormat": ["markdown", "plaintext"]],
                     "definition": ["linkSupport": true]
-                ]
+                ],
+                // Opt in to server-initiated work-done progress so `sourcekit-lsp`
+                // creates an indexing token and streams `$/progress` we can render.
+                "window": ["workDoneProgress": true]
             ]
         ]
         return try await request("initialize", params).decoded(LSPInitializeResult.self)
@@ -243,8 +254,12 @@ public actor LSPClient {
             if let params, let diagnostics = try? params.decoded(LSPPublishDiagnostics.self) {
                 diagnosticsHandler?(diagnostics)
             }
+        case "$/progress":
+            if let params, let progress = try? params.decoded(LSPProgress.self) {
+                progressHandler?(progress)
+            }
         default:
-            break // $/progress, telemetry, etc. — ignored.
+            break // telemetry, etc. — ignored.
         }
     }
 }
