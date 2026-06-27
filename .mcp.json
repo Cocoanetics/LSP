@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "lsp": {
+      "type": "stdio",
+      "command": "swift",
+      "args": ["run", "lsp", "mcp", "."]
+    }
+  }
+}
