@@ -261,9 +261,11 @@ struct LSPCommand {
         // stdout carries the MCP JSON-RPC; logs must go to stderr or they corrupt it.
         LoggingSystem.bootstrap { StreamLogHandler.standardError(label: $0) }
 
-        let target = arguments.first.map { ($0 as NSString).expandingTildeInPath }
-            ?? FileManager.default.currentDirectoryPath
-        let projectRoot = enclosingProjectRoot(for: target)
+        // Resolve to an absolute, standardized root so paths the tools resolve
+        // against it (e.g. `check_file`'s echoed path) are absolute and match the
+        // server-derived `file://` paths the other tools return.
+        let target = absolute(arguments.first ?? FileManager.default.currentDirectoryPath)
+        let projectRoot = (enclosingProjectRoot(for: target) as NSString).standardizingPath
 
         var logger = Logger(label: "com.cocoanetics.lsp.mcp")
         logger.logLevel = .notice
