@@ -1,23 +1,19 @@
 //
 //  LSPKit — talk to a Language Server (LSP) from Swift.
 //
-//  Status: greenfield scaffold. See ../../GOALS.md for the plan, and
-//  ../../probe.py for the validated Content-Length-framed wire flow this should
-//  reproduce in Swift.
+//  The JSON-RPC stack is JSONFoundation's unified runtime (`JSONRPCPeer` +
+//  `ContentLengthFraming` + `JSONRPCStdio.ProcessTransport`); LSPKit adds only the
+//  LSP semantics on top. Entry points:
 //
-//  Build order (smallest new surface first):
-//    1. LSPFramedTransport — Content-Length framing over a subprocess
-//       (copy SwiftACP's SubprocessTransport; swap newline framing for
-//       `Content-Length: <n>\r\n\r\n<json>`).
-//    2. A JSON-RPC peer — copy SwiftACP's JSONRPCConnection (correlation +
-//       dispatch). Flag the duplication; it wants to be a shared package one day.
-//    3. LSPClient — initialize / initialized / didOpen / documentSymbol / hover …
-//    4. CLI (`lsp`) + an MCP server exposing the queries as tools.
+//    - `LSPClient`   — typed lifecycle + interrogation methods over a server.
+//    - `LSPServer`   — launch descriptors (`sourcekit-lsp`, or any command).
+//    - `LSP*` models — positions, ranges, symbols, hover, locations.
+//
+//  See GOALS.md for the roadmap (CLI done; MCP server next).
 //
 
-import JSONFoundation
-
-/// Placeholder so the module compiles. Replace with the real client API.
+/// Namespace for LSPKit metadata.
 public enum LSPKit {
-    public static let about = "Greenfield LSP client — see GOALS.md"
+    /// The library version.
+    public static let version = "0.1.0"
 }

@@ -1,8 +1,24 @@
 // swift-tools-version: 6.1
 import PackageDescription
 
-// Greenfield — see GOALS.md. This scaffold only wires the JSONFoundation
-// dependency and gives you a target to build into; restructure freely.
+// LSPKit drives a Language Server (starting with `sourcekit-lsp`) from Swift over
+// JSON-RPC, and exposes it as a CLI (`lsp`) — the same shape SwiftACP gives ACP.
+//
+// The JSON-RPC stack is **entirely reused** from JSONFoundation 2.1+, which now
+// owns the unified runtime the three sibling projects (SwiftMCP, SwiftACP, LSP)
+// used to hand-roll:
+//
+//   JSONFoundation  `JSONValue` · the `JSONRPCMessage` envelope
+//   JSONRPCPeer     the transport-agnostic correlator + dispatcher (`JSONRPCPeer`)
+//   JSONRPCWire     framing codecs — `ContentLengthFraming` is LSP's wire format
+//   JSONRPCStdio    `ProcessTransport` — a zero-dependency `Foundation.Process`
+//                   stdio transport, generic over the framing
+//
+// LSP differs from ACP/MCP on exactly one axis — `Content-Length` header framing
+// instead of newline-delimited JSON — and that axis is a value
+// (`ContentLengthFraming`) plugged into the shared transport. So LSPKit writes no
+// transport and no peer of its own: it is just typed LSP methods over
+// `JSONRPCPeer(transport: ProcessTransport(launch:, framing: ContentLengthFraming()))`.
 let package = Package(
     name: "LSP",
     platforms: [
@@ -13,16 +29,19 @@ let package = Package(
         .executable(name: "lsp", targets: ["lsp"])
     ],
     dependencies: [
-        // The JSON-RPC envelope. params/result are JSONValue (2.0+) — ideal for
-        // LSP's arbitrarily-shaped payloads. The Content-Length transport framing
-        // is yours to add (JSONFoundation is wire-model only).
-        .package(url: "https://github.com/Cocoanetics/JSONFoundation.git", from: "2.0.0")
+        // The unified JSON-RPC runtime: the envelope (`JSONFoundation`), the peer
+        // (`JSONRPCPeer`), the `Content-Length` framing codec (`JSONRPCWire`), and
+        // the zero-dependency `Foundation.Process` stdio transport (`JSONRPCStdio`).
+        .package(url: "https://github.com/Cocoanetics/JSONFoundation.git", from: "2.1.2")
     ],
     targets: [
         .target(
             name: "LSPKit",
             dependencies: [
-                .product(name: "JSONFoundation", package: "JSONFoundation")
+                .product(name: "JSONFoundation", package: "JSONFoundation"),
+                .product(name: "JSONRPCPeer", package: "JSONFoundation"),
+                .product(name: "JSONRPCWire", package: "JSONFoundation"),
+                .product(name: "JSONRPCStdio", package: "JSONFoundation")
             ]
         ),
         .executableTarget(

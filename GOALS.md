@@ -8,6 +8,33 @@ the Agent Client Protocol.
 
 ---
 
+## Status (2026-06-27): milestones 1–3 done — the unification already shipped
+
+The advice below to **write the `Content-Length` transport yourself** and
+**copy SwiftACP's `JSONRPCConnection` peer** is now **obsolete**. That open idea
+— "extract a shared `JSONRPCPeer` package on top of JSONFoundation" — *landed* in
+JSONFoundation 2.1: it now owns the whole runtime (`JSONRPCPeer`,
+`ContentLengthFraming`/`LineFraming` in `JSONRPCWire`, and the `ProcessTransport`
+stdio transport in `JSONRPCStdio`). SwiftACP already consumes it; so does LSPKit.
+
+What's implemented (see `Sources/LSPKit`, all on the shared runtime — zero
+hand-rolled transport/peer):
+
+- `LSPClient` — `initialize`/`initialized`/`didOpen`/`didClose`/`documentSymbol`/
+  `hover`/`definition`/`references`/`shutdown`+`exit`, over
+  `JSONRPCPeer(transport: ProcessTransport(launch:, framing: ContentLengthFraming()))`.
+- The `LSP*` value types (positions, ranges, symbols+`SymbolKind`, hover, locations).
+- The `lsp` CLI (`symbols`/`hover`/`definition`/`capabilities`), reproducing
+  `probe.py` end-to-end.
+- A live `sourcekit-lsp` round-trip test (`LiveSourceKitTests`, skips if absent).
+
+**Still open (milestone 4):** the MCP server — a `@MCPServer` (SwiftMCP) whose
+`@MCPTool`s call `LSPClient`, the way SwiftACP's `acpxd` exposes ACP sessions.
+
+The historical advice below is kept for context.
+
+---
+
 ## TL;DR — why `xcrun sourcekit-lsp` "starts but never responds"
 
 LSP does **not** use newline-delimited JSON-RPC (which is what ACP and
