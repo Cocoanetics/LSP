@@ -45,10 +45,10 @@ actor LSPMCPServer {
     /// Find symbols by name across the whole project (index-backed fuzzy search) —
     /// the way to turn a name into file locations without reading files.
     /// - Parameter query: The symbol name (or fragment) to search for.
-    /// - Parameter scope: Which sources to search: "project" (default), "dependencies", or "all".
+    /// - Parameter scope: Which sources to search (default: the project's own sources).
     /// - Parameter exact: When true, return only symbols whose name is exactly `query`.
     @MCPTool
-    func find_symbol(query: String, scope: String = "project", exact: Bool = false) async throws -> [SymbolMatch] {
+    func find_symbol(query: String, scope: LSPSymbolScope = .project, exact: Bool = false) async throws -> [SymbolMatch] {
         try await searchSymbols(query: query, scope: scope, exact: exact).map(SymbolMatch.init)
     }
 
@@ -56,12 +56,12 @@ actor LSPMCPServer {
     /// found by name across the project. Returns one entry per match (overloads,
     /// same-named types, …).
     /// - Parameter query: The symbol name to look up.
-    /// - Parameter scope: Which sources to search: "project" (default), "dependencies", or "all".
+    /// - Parameter scope: Which sources to search (default: the project's own sources).
     /// - Parameter exact: When true, only symbols whose name is exactly `query`.
     /// - Parameter includeDocumentation: When true, include the full doc comment, not just the signature.
     @MCPTool
     func declaration(
-        query: String, scope: String = "project", exact: Bool = false, includeDocumentation: Bool = false
+        query: String, scope: LSPSymbolScope = .project, exact: Bool = false, includeDocumentation: Bool = false
     ) async throws -> [DeclarationMatch] {
         let client = try await session.client()
         let matches = try await searchSymbols(query: query, scope: scope, exact: exact)
@@ -129,11 +129,11 @@ actor LSPMCPServer {
     // MARK: - Shared
 
     /// Warm client + index, then a scope/exact-filtered `workspace/symbol` search.
-    private func searchSymbols(query: String, scope: String, exact: Bool) async throws -> [LSPSymbolInformation] {
+    private func searchSymbols(query: String, scope: LSPSymbolScope, exact: Bool) async throws -> [LSPSymbolInformation] {
         let client = try await session.client()
         try await client.waitForIndex()
         let raw = try await client.workspaceSymbol(query)
-        return lspFilterSymbols(raw, query: query, scope: LSPSymbolScope(flag: scope) ?? .project, exact: exact)
+        return lspFilterSymbols(raw, query: query, scope: scope, exact: exact)
     }
 
     /// Resolve `file`, get the warm client, and open the document so position queries
