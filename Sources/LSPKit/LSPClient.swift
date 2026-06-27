@@ -159,6 +159,21 @@ public actor LSPClient {
         return try result.decoded([LSPDocumentSymbol].self)
     }
 
+    /// `workspace/symbol` — a project-wide, index-backed fuzzy search by name,
+    /// returning every matching symbol as `{ name, kind, location }`. Unlike the
+    /// `textDocument/*` queries it needs no `didOpen` and no position: it reads the
+    /// background index, so it's the natural *name → location* entry point.
+    ///
+    /// The index builds asynchronously after `initialize`, so an early call on a
+    /// cold project can return fewer results (or none) before indexing settles —
+    /// retry, or drive it through a readiness wait at the call site.
+    public func workspaceSymbol(_ query: String) async throws -> [LSPSymbolInformation] {
+        let params: JSONValue = ["query": .string(query)]
+        let result = try await request("workspace/symbol", params)
+        if case .null = result { return [] }
+        return try result.decoded([LSPSymbolInformation].self)
+    }
+
     /// `textDocument/hover` at a 0-based `(line, character)` (UTF-16 column).
     public func hover(path: String, line: Int, character: Int) async throws -> LSPHover? {
         let result = try await request(

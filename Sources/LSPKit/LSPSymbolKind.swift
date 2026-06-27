@@ -29,6 +29,17 @@ public enum LSPSymbolKind: Int, Sendable, CaseIterable {
     case `operator` = 25
     case typeParameter = 26
 
+    /// Look up a kind by its ``displayName`` (case-insensitive), e.g. `"class"`,
+    /// `"enumMember"`. `nil` for an unknown name — useful for parsing a `--kind`
+    /// filter from the command line.
+    public init?(name: String) {
+        let needle = name.lowercased()
+        guard let match = Self.allCases.first(where: { $0.displayName.lowercased() == needle }) else {
+            return nil
+        }
+        self = match
+    }
+
     /// A lower-camelCase label for the kind (`enumMember`, `typeParameter`, …).
     public var displayName: String {
         switch self {

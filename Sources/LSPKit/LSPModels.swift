@@ -84,6 +84,59 @@ public struct LSPDocumentSymbol: Codable, Sendable {
     }
 }
 
+/// One match from `workspace/symbol` — the project-wide, index-backed symbol
+/// search that turns a *name* into *locations* (the query an agent actually has,
+/// versus the `line:character` coordinate `hover`/`definition` demand).
+///
+/// The wire type is LSP `SymbolInformation` (`{ name, kind, location,
+/// containerName? }`). The newer `WorkspaceSymbol` shape — whose `location` may
+/// carry only a `uri`, with the range resolved lazily — also decodes here: a
+/// missing range folds to a zero range. `sourcekit-lsp` returns full locations.
+public struct LSPSymbolInformation: Sendable {
+    public var name: String
+    /// The raw LSP integer kind; ``symbolKind`` decodes it to ``LSPSymbolKind``.
+    public var kind: Int
+    public var location: LSPLocation
+    /// The enclosing symbol the server reports (a type, extension, or file), when any.
+    public var containerName: String?
+
+    /// The typed symbol kind (`.class`, `.function`, …), or `nil` for an
+    /// unrecognized integer.
+    public var symbolKind: LSPSymbolKind? { LSPSymbolKind(rawValue: kind) }
+
+    public init(name: String, kind: Int, location: LSPLocation, containerName: String? = nil) {
+        self.name = name
+        self.kind = kind
+        self.location = location
+        self.containerName = containerName
+    }
+}
+
+extension LSPSymbolInformation: Decodable {
+    private enum CodingKeys: String, CodingKey { case name, kind, location, containerName }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.kind = try container.decode(Int.self, forKey: .kind)
+        self.containerName = try container.decodeIfPresent(String.self, forKey: .containerName)
+        // Tolerate the `WorkspaceSymbol` form where `location` is `{ uri }` only.
+        let location = try container.decode(TolerantLocation.self, forKey: .location)
+        self.location = location.resolved
+    }
+
+    /// A `Location` whose `range` may be absent (the lazy `WorkspaceSymbol` shape).
+    private struct TolerantLocation: Decodable {
+        var uri: String
+        var range: LSPRange?
+
+        var resolved: LSPLocation {
+            let zero = LSPPosition(line: 0, character: 0)
+            return LSPLocation(uri: uri, range: range ?? LSPRange(start: zero, end: zero))
+        }
+    }
+}
+
 /// `textDocument/hover` result, flattened to its display text. The wire `contents`
 /// has three legal shapes (a `MarkupContent` object, a marked-string, or an array
 /// of marked-strings); the custom decoder folds all three into ``value``.
