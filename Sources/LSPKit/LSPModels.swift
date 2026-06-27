@@ -112,7 +112,7 @@ public struct LSPSymbolInformation: Sendable {
     }
 }
 
-extension LSPSymbolInformation: Decodable {
+extension LSPSymbolInformation: Codable {
     private enum CodingKeys: String, CodingKey { case name, kind, location, containerName }
 
     public init(from decoder: Decoder) throws {

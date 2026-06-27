@@ -120,6 +120,16 @@ public actor LSPClient {
         try await notify("initialized", [:])
     }
 
+    /// `workspace/synchronize` with `index: true` — `sourcekit-lsp`'s request to wait
+    /// until its build graph is current *and* background indexing has finished before
+    /// returning. A deterministic "the index is ready" signal: no polling, no timers
+    /// — you `await` it and it returns when indexing has drained (immediately if the
+    /// index is already up to date). Supersedes the older `workspace/_pollIndex`; not
+    /// LSP spec, but it's the hook `sourcekit-lsp`'s own tests use.
+    public func waitForIndex() async throws {
+        _ = try await request("workspace/synchronize", ["index": .bool(true)])
+    }
+
     /// `shutdown` request then `exit` notification — the orderly teardown — and
     /// close the transport (terminating the process).
     public func shutdownAndExit() async {
