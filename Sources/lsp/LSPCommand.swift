@@ -11,6 +11,7 @@
 //    lsp symbols <file.swift>                 list the file's document symbols
 //    lsp hover <file.swift> <line> <col>      hover at a 0-based line:column
 //    lsp definition <file.swift> <line> <col> jump-to-definition target(s)
+//    lsp references <file.swift> <line> <col> uses of the symbol at a position
 //    lsp capabilities <file-or-dir>           initialize and print server capabilities
 //
 //  Lines/columns are 0-based; the column is a UTF-16 offset (LSP convention).
@@ -46,6 +47,8 @@ struct LSPCommand {
                 try await hover(arguments: Array(arguments.dropFirst()))
             case "definition":
                 try await definition(arguments: Array(arguments.dropFirst()))
+            case "references":
+                try await references(arguments: Array(arguments.dropFirst()))
             case "capabilities":
                 try await capabilities(arguments: Array(arguments.dropFirst()))
             case "-h", "--help", "help":
@@ -355,6 +358,36 @@ struct LSPCommand {
         await client.shutdownAndExit()
     }
 
+    /// `references <file> <line> <col>`: every use of the symbol at the position.
+    /// Unlike `definition`, results are cross-file, so we wait for the index (with a
+    /// progress bar) before querying — otherwise early results are incomplete.
+    static func references(arguments: [String]) async throws {
+        guard arguments.count >= 3,
+              let line = Int(arguments[1]), let column = Int(arguments[2]) else {
+            throw usageError("references <file> <line> <col>")
+        }
+        let path = absolute(arguments[0])
+        let root = enclosingProjectRoot(for: path)
+
+        let client = try LSPClient(launch: LSPServer.sourceKit())
+        let indexing = IndexingMonitor()
+        await client.setProgressHandler { indexing.handle($0) }
+        await client.start()
+        _ = try await client.initialize(rootURI: LSPURI.file(root))
+        try await client.initialized()
+        try await client.didOpen(path: path)
+        try await client.waitForIndex()
+        indexing.finish()
+
+        let locations = try await client.references(path: path, line: line, character: column)
+        if locations.isEmpty {
+            print("(no references)")
+        } else {
+            for location in locations { print(format(location, root: root)) }
+        }
+        await client.shutdownAndExit()
+    }
+
     static func capabilities(arguments: [String]) async throws {
         guard let target = arguments.first else { throw usageError("capabilities <file-or-dir>") }
         let path = absolute(target)
@@ -451,6 +484,7 @@ struct LSPCommand {
           lsp symbols <file.swift>                 list the file's document symbols
           lsp hover <file.swift> <line> <col>      hover text at a 0-based line:column
           lsp definition <file.swift> <line> <col> jump-to-definition target(s)
+          lsp references <file.swift> <line> <col> uses of the symbol at a position (project-wide)
           lsp capabilities <file-or-dir>           print the server's capabilities
 
         Options for where/decl:
