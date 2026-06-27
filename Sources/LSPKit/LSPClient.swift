@@ -105,17 +105,29 @@ public actor LSPClient {
         clientName: String = "lspkit",
         clientVersion: String = "0.1.0"
     ) async throws -> LSPInitializeResult {
+        // Advertise every `SymbolKind` we understand (the full spec set, 1…26).
+        // Without this a strict server assumes the legacy default (1…18) and
+        // downgrades newer kinds like `Struct`/`EnumMember`/`Operator` to `File` —
+        // so declaring the value set keeps kinds faithful across servers, not just
+        // `sourcekit-lsp`. Derived from the enum so the two never drift.
+        let symbolKind: JSONValue = [
+            "valueSet": .array(LSPSymbolKind.allCases.map { .integer($0.rawValue) })
+        ]
         let params: JSONValue = [
             "processId": .integer(Int(ProcessInfo.processInfo.processIdentifier)),
             "rootUri": rootURI.map { JSONValue.string($0) } ?? .null,
             "clientInfo": ["name": .string(clientName), "version": .string(clientVersion)],
             "capabilities": [
                 "textDocument": [
-                    "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
+                    "documentSymbol": [
+                        "hierarchicalDocumentSymbolSupport": true,
+                        "symbolKind": symbolKind
+                    ],
                     "hover": ["contentFormat": ["markdown", "plaintext"]],
                     "definition": ["linkSupport": true],
                     "publishDiagnostics": ["relatedInformation": true]
                 ],
+                "workspace": ["symbol": ["symbolKind": symbolKind]],
                 // Opt in to server-initiated work-done progress so `sourcekit-lsp`
                 // creates an indexing token and streams `$/progress` we can render.
                 "window": ["workDoneProgress": true]
