@@ -111,13 +111,4 @@ struct SymbolNode: Codable, Sendable {
     }
 }
 
-/// LSP `DiagnosticSeverity`: 1 = error, 2 = warning, 3 = information, 4 = hint.
-func severityName(_ severity: Int?) -> String {
-    switch severity {
-    case 1: return "error"
-    case 2: return "warning"
-    case 3: return "information"
-    case 4: return "hint"
-    default: return "error"
-    }
-}
+// `severityName(_:)` is shared with the CLI commands (see Support/Output.swift).

@@ -39,7 +39,9 @@ let package = Package(
         // same SwiftMCP that backs SwiftACP's `acpxd`.
         .package(url: "https://github.com/Cocoanetics/SwiftMCP.git", from: "1.8.0"),
         // `serve(over:logger:)` takes a swift-log `Logger`.
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0")
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
+        // The CLI is structured as swift-argument-parser subcommands.
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0")
     ],
     targets: [
         .target(
@@ -55,6 +57,7 @@ let package = Package(
             name: "lsp",
             dependencies: [
                 "LSPKit",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 // The `lsp mcp` subcommand serves the tools over an MCP stdio transport.
                 .product(name: "SwiftMCP", package: "SwiftMCP"),
                 .product(name: "Logging", package: "swift-log")
