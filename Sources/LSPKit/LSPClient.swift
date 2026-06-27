@@ -104,7 +104,8 @@ public actor LSPClient {
                 "textDocument": [
                     "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
                     "hover": ["contentFormat": ["markdown", "plaintext"]],
-                    "definition": ["linkSupport": true]
+                    "definition": ["linkSupport": true],
+                    "publishDiagnostics": ["relatedInformation": true]
                 ],
                 // Opt in to server-initiated work-done progress so `sourcekit-lsp`
                 // creates an indexing token and streams `$/progress` we can render.

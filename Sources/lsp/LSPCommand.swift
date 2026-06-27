@@ -6,6 +6,7 @@
 //  Usage:
 //    lsp where <query> [project-dir]          find symbols by name across the project
 //    lsp decl <query> [project-dir]           print a symbol's declaration (signature, +doc)
+//    lsp check <file.swift>                   report syntax/semantic errors (LSP diagnostics)
 //    lsp symbols <file.swift>                 list the file's document symbols
 //    lsp hover <file.swift> <line> <col>      hover at a 0-based line:column
 //    lsp definition <file.swift> <line> <col> jump-to-definition target(s)
@@ -32,6 +33,8 @@ struct LSPCommand {
                 try await whereSymbol(arguments: Array(arguments.dropFirst()))
             case "decl":
                 try await declaration(arguments: Array(arguments.dropFirst()))
+            case "check":
+                try await check(arguments: Array(arguments.dropFirst()))
             case "symbols":
                 try await symbols(arguments: Array(arguments.dropFirst()))
             case "hover":
@@ -69,10 +72,10 @@ struct LSPCommand {
         try await client.initialized()
 
         let matches = try await searchWaitingForIndex(
-            client, query: options.query, scope: options.scope, indexing: indexing)
+            client, query: options.query, scope: options.scope, exact: options.exact, indexing: indexing)
 
         if options.json {
-            printJSON(matches)
+            printJSON(matches.map(SymbolResult.init))
         } else if matches.isEmpty {
             print("(no symbols matching \"\(options.query)\")")
         } else {
@@ -90,7 +93,7 @@ struct LSPCommand {
     /// matches (the "returned at 41%" bug). `synchronize` returns at once when the
     /// index is already up to date, so the warm path stays fast.
     static func searchWaitingForIndex(
-        _ client: LSPClient, query: String, scope: SymbolScope, indexing: IndexingMonitor
+        _ client: LSPClient, query: String, scope: SymbolScope, exact: Bool, indexing: IndexingMonitor
     ) async throws -> [LSPSymbolInformation] {
         // Block on `sourcekit-lsp`'s own "index is ready" signal rather than guessing
         // with timers: `workspace/synchronize` returns only once background indexing
@@ -99,22 +102,35 @@ struct LSPCommand {
         indexing.finish() // clear any bar the final `$/progress` didn't.
 
         // The index is complete now, so a single query is authoritative.
-        return (try await matchingSymbols(client, query: query, scope: scope)) ?? []
+        return (try await matchingSymbols(client, query: query, scope: scope, exact: exact)) ?? []
     }
 
-    /// One `workspace/symbol` call, narrowed by `scope`. Always drops
+    /// One `workspace/symbol` call, narrowed by `scope` (and `exact`). Always drops
     /// compiler-synthesized symbols (mangled `$s…` names from macro expansions like
     /// Swift Testing's `@Test`); `scope` then decides project vs. dependency hits —
     /// fuzzy `workspace/symbol` matches subsequences across every indexed dependency
-    /// (`LSPClient` ⇒ `cancelTaskAndUpstream…`), so the default excludes them.
-    /// Returns `nil` for "no matches" so callers can distinguish it from `[]`.
+    /// (`LSPClient` ⇒ `cancelTaskAndUpstream…`), so the default excludes them. With
+    /// `exact`, keep only symbols whose base name (the identifier before any
+    /// argument-label `(…)`) equals the query — the way to pin one declaration out of
+    /// the fuzzy haystack. Returns `nil` for "no matches" vs. `[]`.
     static func matchingSymbols(
-        _ client: LSPClient, query: String, scope: SymbolScope
+        _ client: LSPClient, query: String, scope: SymbolScope, exact: Bool
     ) async throws -> [LSPSymbolInformation]? {
         let matches = try await client.workspaceSymbol(query).filter { symbol in
-            !symbol.name.hasPrefix("$") && scope.includes(uri: symbol.location.uri)
+            guard !symbol.name.hasPrefix("$"), scope.includes(uri: symbol.location.uri) else {
+                return false
+            }
+            return exact ? baseName(of: symbol.name) == query : true
         }
         return matches.isEmpty ? nil : matches
+    }
+
+    /// The identifier portion of a symbol name, dropping any `(argument:labels:)`
+    /// suffix — so `MCPTool(name:description:)` and the type `MCPTool` both reduce to
+    /// `MCPTool` for exact comparison.
+    static func baseName(of name: String) -> String {
+        guard let paren = name.firstIndex(of: "(") else { return name }
+        return String(name[..<paren])
     }
 
     /// `decl <query> [project-dir] [--full] [--scope …] [--json]`: the one-shot of
@@ -133,7 +149,7 @@ struct LSPCommand {
         try await client.initialized()
 
         let matches = try await searchWaitingForIndex(
-            client, query: options.query, scope: options.scope, indexing: indexing)
+            client, query: options.query, scope: options.scope, exact: options.exact, indexing: indexing)
         if matches.isEmpty {
             if options.json { print("[]") } else { print("(no symbols matching \"\(options.query)\")") }
             await client.shutdownAndExit()
@@ -154,8 +170,7 @@ struct LSPCommand {
             if options.json {
                 jsonResults.append(DeclarationResult(
                     name: match.name,
-                    kind: match.kind,
-                    kindName: match.symbolKind?.displayName,
+                    kind: match.symbolKind,
                     containerName: match.containerName,
                     location: match.location,
                     signature: hover.map { signature(fromHover: $0.value) },
@@ -176,6 +191,69 @@ struct LSPCommand {
         }
         if options.json { printJSON(jsonResults) }
         await client.shutdownAndExit()
+    }
+
+    /// `check <file> [--json]`: lint one file via LSP diagnostics — syntax *and*
+    /// semantic errors (undeclared symbols, type mismatches) from sourcekit-lsp's
+    /// in-memory type-check, no full build needed. `didOpen` hands the server the
+    /// file's text; it pushes `textDocument/publishDiagnostics` once it has
+    /// type-checked. We gate on `workspace/synchronize` first so the target is
+    /// prepared and the *semantic* diagnostics are accurate, not just syntactic.
+    static func check(arguments: [String]) async throws {
+        let json = arguments.contains("--json")
+        guard let file = arguments.first(where: { !$0.hasPrefix("--") }) else {
+            throw usageError("check <file> [--json]")
+        }
+        let path = absolute(file)
+        let root = enclosingProjectRoot(for: path)
+
+        let client = try LSPClient(launch: LSPServer.sourceKit())
+        let indexing = IndexingMonitor()
+        let collector = DiagnosticsCollector(targetPath: path)
+        await client.setProgressHandler { indexing.handle($0) }
+        await client.setDiagnosticsHandler { collector.record(uri: $0.uri, diagnostics: $0.diagnostics) }
+        await client.start()
+        _ = try await client.initialize(rootURI: LSPURI.file(root))
+        try await client.initialized()
+        try await client.didOpen(path: path)
+
+        // Prepare the target (build graph + index) so semantic diagnostics resolve
+        // project symbols correctly; then make sure we've received a publish.
+        try await client.waitForIndex()
+        indexing.finish()
+        await collector.waitForFirstPublish(fallbackMilliseconds: 3_000)
+
+        let diagnostics = collector.diagnostics.sorted {
+            ($0.range.start.line, $0.range.start.character) < ($1.range.start.line, $1.range.start.character)
+        }
+        if json {
+            printJSON(diagnostics.map { DiagnosticResult($0, root: root, uri: collector.targetURI) })
+        } else if diagnostics.isEmpty {
+            print("no issues")
+        } else {
+            for diagnostic in diagnostics { print(formatDiagnostic(diagnostic, root: root, uri: collector.targetURI)) }
+            let errors = diagnostics.filter { $0.severity == 1 }.count
+            let warnings = diagnostics.filter { $0.severity == 2 }.count
+            print("\(errors) error\(errors == 1 ? "" : "s"), \(warnings) warning\(warnings == 1 ? "" : "s")")
+        }
+        await client.shutdownAndExit()
+    }
+
+    static func formatDiagnostic(_ diagnostic: LSPDiagnostic, root: String, uri: String) -> String {
+        let start = diagnostic.range.start
+        return "\(shorten(uri, root: root)):\(start.line + 1):\(start.character + 1): "
+            + "\(severityLabel(diagnostic.severity)): \(diagnostic.message)"
+    }
+
+    /// LSP `DiagnosticSeverity`: 1 = error, 2 = warning, 3 = information, 4 = hint.
+    static func severityLabel(_ severity: Int?) -> String {
+        switch severity {
+        case 1: return "error"
+        case 2: return "warning"
+        case 3: return "note"
+        case 4: return "hint"
+        default: return "error" // unspecified severity is treated as an error by LSP
+        }
     }
 
     /// Pull the first fenced code block — the declaration signature — out of hover
@@ -336,12 +414,14 @@ struct LSPCommand {
         Usage:
           lsp where <query> [project-dir] [opts]   find symbols by name across the project
           lsp decl <query> [project-dir] [opts]    a symbol's declaration (signature; +doc with --full)
+          lsp check <file.swift> [--json]          report syntax/semantic errors in a file (LSP diagnostics)
           lsp symbols <file.swift>                 list the file's document symbols
           lsp hover <file.swift> <line> <col>      hover text at a 0-based line:column
           lsp definition <file.swift> <line> <col> jump-to-definition target(s)
           lsp capabilities <file-or-dir>           print the server's capabilities
 
         Options for where/decl:
+          --exact                            only symbols whose name is exactly <query>
           --scope project|dependencies|all   which sources to search (default: project)
           --json                             emit the full result as JSON
           --full                             (decl) include the doc comment, not just the signature
@@ -395,8 +475,13 @@ final class IndexingMonitor: @unchecked Sendable {
 
     private func render(_ progress: LSPProgress) {
         guard isTTY else { return }
-        let percent = progress.percentage ?? Self.percent(fromMessage: progress.message) ?? 0
+        let counted = Self.percent(fromMessage: progress.message)
+        let percent = progress.percentage ?? counted ?? 0
         let clamped = max(0, min(100, percent))
+        // Show the bar once the file count is known — a determinate "n / m" message —
+        // even at 0%; skip only the indeterminate "Determining files" lead-in, which
+        // carries no count.
+        guard counted != nil || clamped > 0 else { return }
         let filled = barWidth * clamped / 100
         let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: barWidth - filled)
         let detail = progress.message.map { "  \($0)" } ?? ""
@@ -465,6 +550,7 @@ struct SearchOptions {
     var scope: SymbolScope = .project
     var json = false
     var full = false
+    var exact = false
 
     init(parsing arguments: [String], verb: String) throws {
         var positionals: [String] = []
@@ -474,6 +560,7 @@ struct SearchOptions {
             switch argument {
             case "--json": json = true
             case "--full": full = true
+            case "--exact": exact = true
             case "--scope":
                 index += 1
                 guard index < arguments.count, let parsed = SymbolScope(flag: arguments[index]) else {
@@ -506,15 +593,128 @@ struct SearchOptions {
     }
 }
 
-/// A `decl --json` record: the symbol plus its resolved declaration text.
+/// A `where --json` record. `kind` is the typed ``LSPSymbolKind``, which serializes
+/// as its name (`"class"`) rather than the raw LSP integer.
+struct SymbolResult: Encodable {
+    var name: String
+    var kind: LSPSymbolKind?
+    var containerName: String?
+    var location: LSPLocation
+
+    init(_ symbol: LSPSymbolInformation) {
+        self.name = symbol.name
+        self.kind = symbol.symbolKind
+        self.containerName = symbol.containerName
+        self.location = symbol.location
+    }
+}
+
+/// A `decl --json` record: the symbol (see ``SymbolResult``) plus its resolved
+/// declaration text.
 struct DeclarationResult: Encodable {
     var name: String
-    var kind: Int
-    var kindName: String?
+    var kind: LSPSymbolKind?
     var containerName: String?
     var location: LSPLocation
     var signature: String?
     var documentation: String?
+}
+
+/// A `check --json` record — one diagnostic, with severity as a name and 1-based
+/// line/column for easy reading.
+struct DiagnosticResult: Encodable {
+    var severity: String
+    var path: String
+    var line: Int
+    var character: Int
+    var message: String
+
+    init(_ diagnostic: LSPDiagnostic, root: String, uri: String) {
+        self.severity = LSPCommand.severityLabel(diagnostic.severity)
+        self.path = LSPCommand.shorten(uri, root: root)
+        self.line = diagnostic.range.start.line + 1
+        self.character = diagnostic.range.start.character + 1
+        self.message = diagnostic.message
+    }
+}
+
+/// Collects pushed `publishDiagnostics` for one file. sourcekit-lsp uses **push**
+/// diagnostics (it has no advertised pull provider), so there's no request whose
+/// response is "the diagnostics" — they arrive as notifications after type-checking.
+/// This captures the latest set for the target and lets a caller await the first
+/// publish (event-driven, with a fallback so a silent server can't hang us). Matches
+/// by filesystem path, since the server's URI may differ in encoding from ours.
+final class DiagnosticsCollector: @unchecked Sendable {
+    let targetURI: String
+    private let targetPath: String
+    private let lock = NSLock()
+    private var latest: [LSPDiagnostic] = []
+    private var published = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var resumed = false
+
+    init(targetPath: String) {
+        self.targetPath = targetPath
+        self.targetURI = LSPURI.file(targetPath)
+    }
+
+    var diagnostics: [LSPDiagnostic] {
+        lock.lock(); defer { lock.unlock() }
+        return latest
+    }
+
+    /// Feed a `publishDiagnostics` notification. Safe to call from the client handler.
+    func record(uri: String, diagnostics: [LSPDiagnostic]) {
+        guard LSPURI.path(uri) == targetPath else { return }
+        lock.lock()
+        latest = diagnostics
+        published = true
+        let continuation = takeWaiterLocked()
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    /// Resolve once the target's diagnostics have been published — or after the
+    /// fallback, so a server that never publishes (e.g. a clean file it stays silent
+    /// on) can't block us forever. (The `withCheckedContinuation` body is a synchronous
+    /// closure, so the lock is only ever taken from non-async contexts.)
+    func waitForFirstPublish(fallbackMilliseconds: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            guard installWaiter(continuation) else {
+                continuation.resume() // already published before we got here
+                return
+            }
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(fallbackMilliseconds) * 1_000_000)
+                self?.fireFallback()
+            }
+        }
+    }
+
+    /// Store the waiter, or report that the publish already happened. Returns `true`
+    /// when the caller should wait, `false` when it should resume immediately.
+    private func installWaiter(_ continuation: CheckedContinuation<Void, Never>) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if published { return false }
+        waiter = continuation
+        return true
+    }
+
+    private func fireFallback() {
+        lock.lock()
+        let pending = takeWaiterLocked()
+        lock.unlock()
+        pending?.resume()
+    }
+
+    /// Hand out the pending continuation exactly once (whoever calls first — a publish
+    /// or the fallback timer — wins).
+    private func takeWaiterLocked() -> CheckedContinuation<Void, Never>? {
+        guard !resumed, let pending = waiter else { return nil }
+        resumed = true
+        waiter = nil
+        return pending
+    }
 }
 
 private extension String {

@@ -72,3 +72,31 @@ public enum LSPSymbolKind: Int, Sendable, CaseIterable {
         }
     }
 }
+
+extension LSPSymbolKind: Codable {
+    /// Decodes from the LSP wire integer (a `class` is `5`), and — for round-tripping
+    /// our own output — also from a ``displayName`` string. **Encodes as the string
+    /// name**, so emitted JSON reads `"kind": "class"` instead of an opaque `5`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let raw = try? container.decode(Int.self) {
+            guard let kind = LSPSymbolKind(rawValue: raw) else {
+                throw DecodingError.dataCorruptedError(
+                    in: container, debugDescription: "unknown SymbolKind \(raw)")
+            }
+            self = kind
+        } else {
+            let name = try container.decode(String.self)
+            guard let kind = LSPSymbolKind(name: name) else {
+                throw DecodingError.dataCorruptedError(
+                    in: container, debugDescription: "unknown SymbolKind '\(name)'")
+            }
+            self = kind
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(displayName)
+    }
+}
