@@ -32,7 +32,14 @@ let package = Package(
         // The unified JSON-RPC runtime: the envelope (`JSONFoundation`), the peer
         // (`JSONRPCPeer`), the `Content-Length` framing codec (`JSONRPCWire`), and
         // the zero-dependency `Foundation.Process` stdio transport (`JSONRPCStdio`).
-        .package(url: "https://github.com/Cocoanetics/JSONFoundation.git", from: "2.1.2")
+        // 2.3.0 is the floor SwiftMCP requires, and is API-compatible with the 2.1+
+        // runtime LSPKit uses.
+        .package(url: "https://github.com/Cocoanetics/JSONFoundation.git", from: "2.3.0"),
+        // The MCP server layer — `@MCPServer`/`@MCPTool` + the stdio transport — the
+        // same SwiftMCP that backs SwiftACP's `acpxd`.
+        .package(url: "https://github.com/Cocoanetics/SwiftMCP.git", from: "1.8.0"),
+        // `serve(over:logger:)` takes a swift-log `Logger`.
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0")
     ],
     targets: [
         .target(
@@ -46,7 +53,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "lsp",
-            dependencies: ["LSPKit"]
+            dependencies: [
+                "LSPKit",
+                // The `lsp mcp` subcommand serves the tools over an MCP stdio transport.
+                .product(name: "SwiftMCP", package: "SwiftMCP"),
+                .product(name: "Logging", package: "swift-log")
+            ]
         ),
         .testTarget(
             name: "LSPKitTests",

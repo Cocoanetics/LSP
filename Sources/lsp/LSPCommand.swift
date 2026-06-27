@@ -7,6 +7,7 @@
 //    lsp where <query> [project-dir]          find symbols by name across the project
 //    lsp decl <query> [project-dir]           print a symbol's declaration (signature, +doc)
 //    lsp check <file.swift>                   report syntax/semantic errors (LSP diagnostics)
+//    lsp mcp [project-dir]                    run as an MCP server over stdio (agent tools)
 //    lsp symbols <file.swift>                 list the file's document symbols
 //    lsp hover <file.swift> <line> <col>      hover at a 0-based line:column
 //    lsp definition <file.swift> <line> <col> jump-to-definition target(s)
@@ -16,7 +17,9 @@
 //
 
 import Foundation
+import Logging
 import LSPKit
+import SwiftMCP
 
 @main
 struct LSPCommand {
@@ -35,6 +38,8 @@ struct LSPCommand {
                 try await declaration(arguments: Array(arguments.dropFirst()))
             case "check":
                 try await check(arguments: Array(arguments.dropFirst()))
+            case "mcp":
+                try await mcp(arguments: Array(arguments.dropFirst()))
             case "symbols":
                 try await symbols(arguments: Array(arguments.dropFirst()))
             case "hover":
@@ -239,6 +244,33 @@ struct LSPCommand {
         await client.shutdownAndExit()
     }
 
+    /// `mcp [project-dir]`: run as an MCP server over stdio, exposing the same
+    /// queries as tools (`check_file`, `find_symbol`, `declaration`, `hover`,
+    /// `definition`, `references`, `document_symbols`) backed by one warm
+    /// `sourcekit-lsp`. Add it to a project's MCP config:
+    ///
+    ///   { "mcpServers": { "lsp": { "type": "stdio",
+    ///       "command": "/path/to/lsp", "args": ["mcp", "/path/to/project"] } } }
+    ///
+    /// The optional argument is the project root (default: the current directory).
+    /// This call blocks, serving until the transport closes or a signal arrives.
+    static func mcp(arguments: [String]) async throws {
+        // stdout carries the MCP JSON-RPC; logs must go to stderr or they corrupt it.
+        LoggingSystem.bootstrap { StreamLogHandler.standardError(label: $0) }
+
+        let target = arguments.first.map { ($0 as NSString).expandingTildeInPath }
+            ?? FileManager.default.currentDirectoryPath
+        let projectRoot = enclosingProjectRoot(for: target)
+
+        var logger = Logger(label: "com.cocoanetics.lsp.mcp")
+        logger.logLevel = .notice
+        logger.notice("lsp mcp starting", metadata: ["root": .string(projectRoot)])
+
+        let session = LSPSession(root: projectRoot)
+        let server = LSPMCPServer(session: session)
+        try await server.serve(over: [StdioTransport()], logger: logger)
+    }
+
     static func formatDiagnostic(_ diagnostic: LSPDiagnostic, root: String, uri: String) -> String {
         let start = diagnostic.range.start
         return "\(shorten(uri, root: root)):\(start.line + 1):\(start.character + 1): "
@@ -415,6 +447,7 @@ struct LSPCommand {
           lsp where <query> [project-dir] [opts]   find symbols by name across the project
           lsp decl <query> [project-dir] [opts]    a symbol's declaration (signature; +doc with --full)
           lsp check <file.swift> [--json]          report syntax/semantic errors in a file (LSP diagnostics)
+          lsp mcp [project-dir]                     run as an MCP server over stdio (tools for an agent)
           lsp symbols <file.swift>                 list the file's document symbols
           lsp hover <file.swift> <line> <col>      hover text at a 0-based line:column
           lsp definition <file.swift> <line> <col> jump-to-definition target(s)

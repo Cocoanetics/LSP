@@ -40,6 +40,15 @@ public actor LSPClient {
     private var diagnosticsHandler: (@Sendable (LSPPublishDiagnostics) -> Void)?
     private var progressHandler: (@Sendable (LSPProgress) -> Void)?
 
+    /// Open documents, keyed by normalized path → current version (for `didChange`).
+    private var openDocuments: [String: Int] = [:]
+    /// The most recent diagnostics the server pushed per normalized path.
+    private var latestDiagnostics: [String: [LSPDiagnostic]] = [:]
+    /// Count of `publishDiagnostics` notifications received per path — lets
+    /// `diagnostics(forPath:)` tell a fresh publish from a stale one and wait for the
+    /// stream to settle (the semantic pass refines the syntactic one).
+    private var diagnosticsPublishCount: [String: Int] = [:]
+
     /// Spawn `launch` and build the peer over a `Content-Length`-framed stdio
     /// transport. Throws if the server process can't be launched.
     public init(launch: ProcessLaunch) throws {
@@ -165,10 +174,43 @@ public actor LSPClient {
         try await notify("textDocument/didOpen", params)
     }
 
+    /// `textDocument/didChange` with a full-document replacement — push new `text`
+    /// (default: the file's current disk contents) so the server re-checks against
+    /// the edited content. `version` must increase across edits to the same document.
+    public func didChange(path: String, version: Int, text: String? = nil) async throws {
+        let source = try text ?? String(contentsOfFile: path, encoding: .utf8)
+        let params: JSONValue = [
+            "textDocument": ["uri": .string(LSPURI.file(path)), "version": .integer(version)],
+            "contentChanges": [["text": .string(source)]]
+        ]
+        try await notify("textDocument/didChange", params)
+    }
+
     /// `textDocument/didClose`.
     public func didClose(path: String) async throws {
+        let key = Self.documentKey(path)
+        openDocuments[key] = nil
+        latestDiagnostics[key] = nil
         let params: JSONValue = ["textDocument": ["uri": .string(LSPURI.file(path))]]
         try await notify("textDocument/didClose", params)
+    }
+
+    /// Open `path` if new, or `didChange` it to the current disk contents if already
+    /// open (bumping the version) — leaving the server's in-memory copy in sync with
+    /// disk. Returns the normalized document key.
+    @discardableResult
+    public func syncDocument(path: String, text: String? = nil) async throws -> String {
+        let key = Self.documentKey(path)
+        if let version = openDocuments[key] {
+            try await didChange(path: path, version: version + 1, text: text)
+            openDocuments[key] = version + 1
+        } else {
+            try await didOpen(path: path, version: 1, text: text)
+            openDocuments[key] = 1
+        }
+        // A change invalidates the previously published diagnostics for this file.
+        latestDiagnostics[key] = nil
+        return key
     }
 
     // MARK: - Interrogation
@@ -228,6 +270,62 @@ public actor LSPClient {
         return Self.locations(from: result)
     }
 
+    // MARK: - Diagnostics
+
+    /// Open (or update) `path` and return the diagnostics the server publishes for
+    /// it — the syntax *and* semantic errors of an in-memory type-check, no build
+    /// required. sourcekit-lsp prepares the file's target on demand and pushes
+    /// `publishDiagnostics` (a syntactic pass, then a refined semantic one); this
+    /// waits until that stream settles (`quietMilliseconds` with no new publish),
+    /// capped at `capMilliseconds`.
+    ///
+    /// `prepareIndex` additionally blocks on a full `workspace/synchronize` first —
+    /// only worth it when cross-module resolution matters and you can pay the index
+    /// cost; for a quick "did my edit break this file" check, leave it off.
+    public func diagnostics(
+        forPath path: String, text: String? = nil, prepareIndex: Bool = false,
+        quietMilliseconds: UInt64 = 700, capMilliseconds: UInt64 = 30_000
+    ) async throws -> [LSPDiagnostic] {
+        let key = try await syncDocument(path: path, text: text)
+        if prepareIndex { try await waitForIndex() }
+        return await diagnosticsAfterSettling(
+            key: key, quietMilliseconds: quietMilliseconds, capMilliseconds: capMilliseconds)
+    }
+
+    /// Poll for `publishDiagnostics` activity on `key` until it goes quiet (no new
+    /// publish for `quietMilliseconds`) after at least one has arrived, or `cap` is
+    /// hit. Push diagnostics have no "final" signal, so a settle is the honest wait.
+    private func diagnosticsAfterSettling(
+        key: String, quietMilliseconds: UInt64, capMilliseconds: UInt64
+    ) async -> [LSPDiagnostic] {
+        let step: UInt64 = 200
+        var elapsed: UInt64 = 0
+        var quiet: UInt64 = 0
+        var lastCount = diagnosticsPublishCount[key] ?? 0
+        var sawPublish = latestDiagnostics[key] != nil
+        while elapsed < capMilliseconds {
+            try? await Task.sleep(nanoseconds: step * 1_000_000)
+            elapsed += step
+            let count = diagnosticsPublishCount[key] ?? 0
+            if count != lastCount {
+                lastCount = count
+                sawPublish = true
+                quiet = 0
+            } else if sawPublish {
+                quiet += step
+                if quiet >= quietMilliseconds { break }
+            }
+        }
+        return latestDiagnostics[key] ?? []
+    }
+
+    /// A normalized filesystem-path key so `file://` URIs and plain paths that point
+    /// at the same file collapse to one document identity.
+    static func documentKey(_ pathOrURI: String) -> String {
+        let path = LSPURI.path(pathOrURI) ?? pathOrURI
+        return (path as NSString).standardizingPath
+    }
+
     // MARK: - Plumbing
 
     private func positionParams(path: String, line: Int, character: Int) -> JSONValue {
@@ -262,8 +360,11 @@ public actor LSPClient {
                 logHandler?(message)
             }
         case "textDocument/publishDiagnostics":
-            if let params, let diagnostics = try? params.decoded(LSPPublishDiagnostics.self) {
-                diagnosticsHandler?(diagnostics)
+            if let params, let published = try? params.decoded(LSPPublishDiagnostics.self) {
+                let key = Self.documentKey(published.uri)
+                latestDiagnostics[key] = published.diagnostics
+                diagnosticsPublishCount[key, default: 0] += 1
+                diagnosticsHandler?(published)
             }
         case "$/progress":
             if let params, let progress = try? params.decoded(LSPProgress.self) {
