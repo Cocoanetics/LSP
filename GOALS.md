@@ -3,12 +3,12 @@
 A greenfield exploration: talk to a Language Server (starting with
 `sourcekit-lsp`) from Swift using **JSONFoundation**'s JSON-RPC types, then grow
 it into a library that exposes *any* LSP as both a **CLI** and an **MCP server**
-— the same shape as [SwiftACP](file:///Users/oliver/Developer/SwiftACP) does for
+— the same shape as [SwiftACP](https://github.com/Cocoanetics/SwiftACP) does for
 the Agent Client Protocol.
 
 ---
 
-## Status (2026-06-27): milestones 1–3 done — the unification already shipped
+## Status (2026-07-01): all four milestones done — CLI *and* MCP server shipped
 
 The advice below to **write the `Content-Length` transport yourself** and
 **copy SwiftACP's `JSONRPCConnection` peer** is now **obsolete**. That open idea
@@ -24,14 +24,15 @@ hand-rolled transport/peer):
   `hover`/`definition`/`references`/`shutdown`+`exit`, over
   `JSONRPCPeer(transport: ProcessTransport(launch:, framing: ContentLengthFraming()))`.
 - The `LSP*` value types (positions, ranges, symbols+`SymbolKind`, hover, locations).
-- The `lsp` CLI (`symbols`/`hover`/`definition`/`capabilities`), reproducing
-  `probe.py` end-to-end.
+- The `lsp` CLI, as swift-argument-parser subcommands:
+  `where`/`decl`/`check`/`symbols`/`hover`/`definition`/`references`/`capabilities`.
+- The `lsp mcp` MCP server — a `@MCPServer` (SwiftMCP) whose `@MCPTool`s
+  (`check_file`, `find_symbol`, `declaration`, `hover`, `definition`, `references`,
+  `document_symbols`) call `LSPClient`, backed by a warm, self-respawning
+  `LSPSession` — the way SwiftACP's `acpxd` exposes ACP sessions.
 - A live `sourcekit-lsp` round-trip test (`LiveSourceKitTests`, skips if absent).
 
-**Still open (milestone 4):** the MCP server — a `@MCPServer` (SwiftMCP) whose
-`@MCPTool`s call `LSPClient`, the way SwiftACP's `acpxd` exposes ACP sessions.
-
-The historical advice below is kept for context.
+The four milestones below are all done. The historical advice is kept for context.
 
 ---
 
@@ -112,7 +113,7 @@ wrong and hovers land in the wrong place).
 
 ## Reuse JSONFoundation for the envelope
 
-[JSONFoundation](file:///Users/oliver/Developer/JSONFoundation) **2.0.0** is the
+[JSONFoundation](https://github.com/Cocoanetics/JSONFoundation) **2.0.0** is the
 right base and already does the JSON-RPC half:
 
 - `JSONRPCMessage` (`.request` / `.notification` / `.response` / `.errorResponse`)
@@ -135,7 +136,7 @@ Depend on it: `.package(url: "https://github.com/Cocoanetics/JSONFoundation.git"
 ## Architecture — mirror SwiftACP
 
 SwiftACP is the template. Study these files
-(`/Users/oliver/Developer/SwiftACP/Sources/SwiftACP/`):
+(in [SwiftACP](https://github.com/Cocoanetics/SwiftACP)'s `Sources/SwiftACP/`):
 
 - `Transport/MessageTransport.swift` — a tiny transport protocol (`write` / inbound
   `AsyncThrowingStream` / `close`).
@@ -211,9 +212,9 @@ A minimal `Package.swift` + stubs are already in this folder so you can
   https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/
   (see *Base Protocol* for framing, *Lifecycle Messages* for the handshake,
   *Language Features* for documentSymbol/hover/definition).
-- **SwiftACP** — `/Users/oliver/Developer/SwiftACP` — the structural template
+- **SwiftACP** — https://github.com/Cocoanetics/SwiftACP — the structural template
   (subprocess transport, JSON-RPC peer, CLI `acpx`, MCP daemon `acpxd`).
-- **JSONFoundation** — `/Users/oliver/Developer/JSONFoundation` — the JSON-RPC
+- **JSONFoundation** — https://github.com/Cocoanetics/JSONFoundation — the JSON-RPC
   envelope (`JSONRPCMessage`, accessors, `encodedString()`).
-- **SwiftMCP** — `/Users/oliver/Developer/SwiftMCP` — for the MCP-server layer
+- **SwiftMCP** — https://github.com/Cocoanetics/SwiftMCP — for the MCP-server layer
   (`@MCPServer` / `@MCPTool`).

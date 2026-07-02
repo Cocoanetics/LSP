@@ -9,7 +9,8 @@
 //    - `LSPServer`   — launch descriptors (`sourcekit-lsp`, or any command).
 //    - `LSP*` models — positions, ranges, symbols, hover, locations.
 //
-//  See GOALS.md for the roadmap (CLI done; MCP server next).
+//  The `lsp` executable layers a CLI and an MCP server on top; see GOALS.md for
+//  the design narrative and roadmap.
 //
 
 /// Namespace for LSPKit metadata.

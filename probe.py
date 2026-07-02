@@ -21,8 +21,9 @@ import subprocess
 import json
 import os
 
-PROJECT = os.path.expanduser("~/Developer/JSONFoundation")
-FILE = os.path.join(PROJECT, "Sources/JSONFoundation/JSONRPC/JSONRPCID.swift")
+# Probe this very repo, so it runs out of the box on a fresh clone.
+PROJECT = os.path.dirname(os.path.abspath(__file__))
+FILE = os.path.join(PROJECT, "Sources/LSPKit/LSPClient.swift")
 
 
 def frame(msg: dict) -> bytes:
@@ -101,7 +102,7 @@ send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/documentSymbol", "param
     "textDocument": {"uri": "file://" + FILE},
 }})
 resp = await_response(proc.stdout, 2)
-print("documentSymbol -> symbols in JSONRPCID.swift:")
+print("documentSymbol -> symbols in %s:" % os.path.basename(FILE))
 for sym in (resp or {}).get("result", []) or []:
     children = sym.get("children", [])
     print("  - %s (kind %s)%s" % (
