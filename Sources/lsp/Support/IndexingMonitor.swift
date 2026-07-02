@@ -43,7 +43,7 @@ final class IndexingMonitor: @unchecked Sendable {
 
     private func render(_ progress: LSPProgress) {
         guard isTTY else { return }
-        let counted = Self.percent(fromMessage: progress.message)
+        let counted = IndexProgressState.percent(fromMessage: progress.message)
         let percent = progress.percentage ?? counted ?? 0
         let clamped = max(0, min(100, percent))
         // Show the bar once the file count is known — a determinate "n / m" message —
@@ -65,17 +65,5 @@ final class IndexingMonitor: @unchecked Sendable {
 
     private func write(_ text: String) {
         FileHandle.standardError.write(Data(text.utf8))
-    }
-
-    /// Parse a `"30 / 48"`-style count into a 0–100 percentage (the server sends
-    /// this even when the explicit `percentage` field is absent).
-    private static func percent(fromMessage message: String?) -> Int? {
-        guard let message else { return nil }
-        let parts = message.split(separator: "/")
-        guard parts.count == 2,
-              let done = Int(parts[0].trimmingCharacters(in: .whitespaces)),
-              let total = Int(parts[1].trimmingCharacters(in: .whitespaces)),
-              total > 0 else { return nil }
-        return done * 100 / total
     }
 }

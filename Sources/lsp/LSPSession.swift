@@ -44,6 +44,14 @@ actor LSPSession {
         do {
             let client = try await task.value
             liveGeneration = generation
+            // One handler fans the server's `$/progress` out to whatever sinks are
+            // registered — the MCP tools bridge indexing progress to their caller.
+            // Weak self so the client (which retains the handler) doesn't retain the
+            // session back.
+            await client.setProgressHandler { [weak self] progress in
+                guard let self else { return }
+                Task { await self.deliverProgress(progress) }
+            }
             // Watch the server: when it exits, mark this generation dead so the next
             // `client()` respawns instead of reusing a closed connection.
             Task { [weak self] in
@@ -63,6 +71,28 @@ actor LSPSession {
         startup = nil
     }
 
+    // MARK: - Progress fan-out
+
+    /// Sinks that want the server's `$/progress` (an MCP tool, for the span of one
+    /// request, bridging indexing progress to its caller's progress token). Keyed so
+    /// each can unsubscribe when its request finishes.
+    private var progressSinks: [UUID: @Sendable (LSPProgress) -> Void] = [:]
+
+    /// Register a progress sink; returns its id, to pass to ``removeProgressSink(_:)``.
+    func addProgressSink(_ sink: @escaping @Sendable (LSPProgress) -> Void) -> UUID {
+        let id = UUID()
+        progressSinks[id] = sink
+        return id
+    }
+
+    func removeProgressSink(_ id: UUID) {
+        progressSinks[id] = nil
+    }
+
+    private func deliverProgress(_ progress: LSPProgress) {
+        for sink in progressSinks.values { sink(progress) }
+    }
+
     /// Orderly teardown — terminate the language server. Called from the MCP
     /// server's `shutdown()` hook after the transport stops.
     func shutdown() async {
@@ -77,7 +107,10 @@ actor LSPSession {
     /// Resolve a tool-supplied path to an absolute one: `~` expanded, and relative
     /// paths taken against the project root.
     func resolve(_ file: String) -> String {
-        let expanded = (file as NSString).expandingTildeInPath
+        // Agents routinely send arguments with a trailing newline (`"Foo.swift\n"`);
+        // left in, it corrupts the path and nothing resolves. Trim before expanding.
+        let trimmed = file.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expanded = (trimmed as NSString).expandingTildeInPath
         if (expanded as NSString).isAbsolutePath { return expanded }
         return (root as NSString).appendingPathComponent(expanded)
     }

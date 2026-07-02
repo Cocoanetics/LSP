@@ -36,7 +36,9 @@ actor LSPMCPServer {
         // Semantic diagnostics need the file's target prepared; `prepareIndex` blocks
         // on `workspace/synchronize` to ensure that. The cost is paid once — the warm
         // session keeps the index ready for later checks.
-        let diagnostics = try await client.diagnostics(forPath: path, prepareIndex: true)
+        let diagnostics = try await withIndexProgress {
+            try await client.diagnostics(forPath: path, prepareIndex: true)
+        }
         return CheckResult(file: path, diagnostics: diagnostics)
     }
 
@@ -88,9 +90,11 @@ actor LSPMCPServer {
     /// - Parameter column: 1-based column number.
     @MCPTool
     func hover(file: String, line: Int, column: Int) async throws -> String {
-        let (client, path) = try await openedClient(forFile: file)
-        let hover = try await client.hover(path: path, line: line - 1, character: column - 1)
-        return hover?.value ?? "(no hover information at \(line):\(column))"
+        try await withIndexProgress {
+            let (client, path) = try await openedClient(forFile: file)
+            let hover = try await client.hover(path: path, line: line - 1, character: column - 1)
+            return hover?.value ?? "(no hover information at \(line):\(column))"
+        }
     }
 
     /// Find where the symbol at a position is defined.
@@ -99,8 +103,10 @@ actor LSPMCPServer {
     /// - Parameter column: 1-based column number.
     @MCPTool
     func definition(file: String, line: Int, column: Int) async throws -> [Location] {
-        let (client, path) = try await openedClient(forFile: file)
-        return try await client.definition(path: path, line: line - 1, character: column - 1).map(Location.init)
+        try await withIndexProgress {
+            let (client, path) = try await openedClient(forFile: file)
+            return try await client.definition(path: path, line: line - 1, character: column - 1).map(Location.init)
+        }
     }
 
     /// Find all references to the symbol at a position (project-wide; depends on the
@@ -113,8 +119,10 @@ actor LSPMCPServer {
         let client = try await session.client()
         let path = await session.resolve(file)
         try await client.syncDocument(path: path)
-        try await client.waitForIndex()
-        return try await client.references(path: path, line: line - 1, character: column - 1).map(Location.init)
+        return try await withIndexProgress {
+            try await client.waitForIndex()
+            return try await client.references(path: path, line: line - 1, character: column - 1).map(Location.init)
+        }
     }
 
     /// List the document symbols (types, methods, properties) declared in a file, as
@@ -122,18 +130,54 @@ actor LSPMCPServer {
     /// - Parameter file: Path to the file (absolute, or relative to the project root).
     @MCPTool
     func document_symbols(file: String) async throws -> [SymbolNode] {
-        let (client, path) = try await openedClient(forFile: file)
-        return try await client.documentSymbol(path: path).map(SymbolNode.init)
+        try await withIndexProgress {
+            let (client, path) = try await openedClient(forFile: file)
+            return try await client.documentSymbol(path: path).map(SymbolNode.init)
+        }
     }
 
     // MARK: - Shared
 
+    /// Run `body` while forwarding `sourcekit-lsp`'s background-indexing `$/progress`
+    /// to the caller's MCP progress token — so a cold call (waiting on the index or a
+    /// target's preparation) streams progress instead of blocking silently. A no-op
+    /// when the client supplied no `progressToken`, and silent on warm calls (no
+    /// indexing → no events). Concurrent tool calls each register their own sink, so
+    /// they don't clobber one another.
+    private func withIndexProgress<T>(_ body: () async throws -> T) async throws -> T {
+        guard let progressToken = RequestContext.current?.meta?.progressToken,
+              let mcpSession = Session.current else {
+            return try await body()
+        }
+        let state = IndexProgressState()
+        let sinkID = await session.addProgressSink { progress in
+            guard let (percent, message) = state.update(progress) else { return }
+            Task {
+                await mcpSession.sendProgressNotification(
+                    progressToken: progressToken, progress: Double(percent), total: 100, message: message)
+            }
+        }
+        do {
+            let result = try await body()
+            await session.removeProgressSink(sinkID)
+            return result
+        } catch {
+            await session.removeProgressSink(sinkID)
+            throw error
+        }
+    }
+
     /// Warm client + index, then a scope/exact-filtered `workspace/symbol` search.
     private func searchSymbols(query: String, scope: LSPSymbolScope, exact: Bool) async throws -> [LSPSymbolInformation] {
+        // Trim first: agents often send `"LSP\n"`, and the trailing newline makes both
+        // the fuzzy `workspace/symbol` query and the `exact` name comparison miss.
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let client = try await session.client()
-        try await client.waitForIndex()
-        let raw = try await client.workspaceSymbol(query)
-        return lspFilterSymbols(raw, query: query, scope: scope, exact: exact)
+        return try await withIndexProgress {
+            try await client.waitForIndex()
+            let raw = try await client.workspaceSymbol(query)
+            return lspFilterSymbols(raw, query: query, scope: scope, exact: exact)
+        }
     }
 
     /// Resolve `file`, get the warm client, and open the document so position queries
