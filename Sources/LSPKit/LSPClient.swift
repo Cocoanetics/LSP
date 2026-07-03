@@ -26,7 +26,7 @@ import JSONRPCWire
 ///
 /// ```swift
 /// let client = try LSPClient(launch: LSPServer.sourceKit())
-/// try await client.start()
+/// await client.start()
 /// _ = try await client.initialize(rootURI: LSPURI.file(projectDir))
 /// try await client.initialized()
 /// try await client.didOpen(path: file)
@@ -61,20 +61,24 @@ public actor LSPClient {
     public var processIdentifier: Int32 { transport.processIdentifier }
 
     /// Observe the server's `window/logMessage` notifications (its diagnostics about
-    /// itself, distinct from source diagnostics). Pass `nil` to stop.
+    /// itself, distinct from source diagnostics). Install before ``start()`` to catch
+    /// the earliest messages; later installs only see what arrives after. Pass `nil`
+    /// to stop.
     public func setLogHandler(_ handler: (@Sendable (LSPLogMessage) -> Void)?) {
         logHandler = handler
     }
 
     /// Observe `textDocument/publishDiagnostics` — the source warnings/errors the
-    /// server pushes for open documents. Pass `nil` to stop.
+    /// server pushes for open documents. Install before ``start()`` to catch the
+    /// first publish; later installs only see what arrives after. Pass `nil` to stop.
     public func setDiagnosticsHandler(_ handler: (@Sendable (LSPPublishDiagnostics) -> Void)?) {
         diagnosticsHandler = handler
     }
 
     /// Observe `$/progress` work-done progress — `sourcekit-lsp` streams these for
     /// background indexing (begin → report* → end), with a percentage when it knows
-    /// one. Drive a progress bar from this. Pass `nil` to stop.
+    /// one. Drive a progress bar from this. Install before ``start()`` so the `begin`
+    /// isn't missed. Pass `nil` to stop.
     public func setProgressHandler(_ handler: (@Sendable (LSPProgress) -> Void)?) {
         progressHandler = handler
     }
@@ -103,7 +107,7 @@ public actor LSPClient {
     public func initialize(
         rootURI: String?,
         clientName: String = "lspkit",
-        clientVersion: String = "0.1.0"
+        clientVersion: String = LSPKit.version
     ) async throws -> LSPInitializeResult {
         // Advertise every `SymbolKind` we understand (the full spec set, 1…26).
         // Without this a strict server assumes the legacy default (1…18) and
@@ -171,6 +175,8 @@ public actor LSPClient {
     /// `textDocument/didOpen` — hand the server the file's text so it can answer
     /// queries against the in-memory copy (the server does *not* read disk for
     /// open documents). `text` defaults to the file's current contents on disk.
+    /// Records the document as open (so ``syncDocument(path:text:)`` can version
+    /// later edits) and invalidates any previously published diagnostics for it.
     public func didOpen(
         path: String, languageId: String? = nil, version: Int = 1, text: String? = nil
     ) async throws {
@@ -184,11 +190,16 @@ public actor LSPClient {
             ]
         ]
         try await notify("textDocument/didOpen", params)
+        let key = Self.documentKey(path)
+        openDocuments[key] = version
+        latestDiagnostics[key] = nil
     }
 
     /// `textDocument/didChange` with a full-document replacement — push new `text`
     /// (default: the file's current disk contents) so the server re-checks against
     /// the edited content. `version` must increase across edits to the same document.
+    /// Updates the version bookkeeping and invalidates the previously published
+    /// diagnostics, which described the old content.
     public func didChange(path: String, version: Int, text: String? = nil) async throws {
         let source = try text ?? String(contentsOfFile: path, encoding: .utf8)
         let params: JSONValue = [
@@ -196,13 +207,17 @@ public actor LSPClient {
             "contentChanges": [["text": .string(source)]]
         ]
         try await notify("textDocument/didChange", params)
+        let key = Self.documentKey(path)
+        openDocuments[key] = version
+        latestDiagnostics[key] = nil
     }
 
-    /// `textDocument/didClose`.
+    /// `textDocument/didClose` — and drop the document's local bookkeeping.
     public func didClose(path: String) async throws {
         let key = Self.documentKey(path)
         openDocuments[key] = nil
         latestDiagnostics[key] = nil
+        diagnosticsPublishCount[key] = nil
         let params: JSONValue = ["textDocument": ["uri": .string(LSPURI.file(path))]]
         try await notify("textDocument/didClose", params)
     }
@@ -215,13 +230,9 @@ public actor LSPClient {
         let key = Self.documentKey(path)
         if let version = openDocuments[key] {
             try await didChange(path: path, version: version + 1, text: text)
-            openDocuments[key] = version + 1
         } else {
-            try await didOpen(path: path, version: 1, text: text)
-            openDocuments[key] = 1
+            try await didOpen(path: path, text: text)
         }
-        // A change invalidates the previously published diagnostics for this file.
-        latestDiagnostics[key] = nil
         return key
     }
 
@@ -258,18 +269,18 @@ public actor LSPClient {
         return try result.decoded(LSPHover.self)
     }
 
-    /// `textDocument/definition` — where the symbol at the position is defined.
-    /// Servers may answer with `Location`, `Location[]`, or `LocationLink[]`; all
-    /// three are normalized to ``LSPLocation``.
+    /// `textDocument/definition` — where the symbol at the 0-based `(line,
+    /// character)` (UTF-16 column) is defined. Servers may answer with `Location`,
+    /// `Location[]`, or `LocationLink[]`; all three are normalized to ``LSPLocation``.
     public func definition(path: String, line: Int, character: Int) async throws -> [LSPLocation] {
         let result = try await request(
             "textDocument/definition", positionParams(path: path, line: line, character: character))
         return Self.locations(from: result)
     }
 
-    /// `textDocument/references` — uses of the symbol at the position. Cross-file
-    /// results depend on the background index being ready, so early calls may
-    /// return fewer than expected.
+    /// `textDocument/references` — uses of the symbol at the 0-based `(line,
+    /// character)` (UTF-16 column). Cross-file results depend on the background
+    /// index being ready, so early calls may return fewer than expected.
     public func references(
         path: String, line: Int, character: Int, includeDeclaration: Bool = true
     ) async throws -> [LSPLocation] {
@@ -288,44 +299,50 @@ public actor LSPClient {
     /// it — the syntax *and* semantic errors of an in-memory type-check, no build
     /// required. sourcekit-lsp prepares the file's target on demand and pushes
     /// `publishDiagnostics` (a syntactic pass, then a refined semantic one); this
-    /// waits until that stream settles (`quietMilliseconds` with no new publish),
-    /// capped at `capMilliseconds`.
+    /// waits until that stream settles (`quiet` with no new publish), capped at
+    /// `cap`. A server that publishes *nothing* for the document (it can't associate
+    /// the file with a target) is given up on after `firstPublish` — silence is
+    /// then reported as no diagnostics, not proof the file is clean.
     ///
     /// `prepareIndex` additionally blocks on a full `workspace/synchronize` first —
     /// only worth it when cross-module resolution matters and you can pay the index
     /// cost; for a quick "did my edit break this file" check, leave it off.
     public func diagnostics(
         forPath path: String, text: String? = nil, prepareIndex: Bool = false,
-        quietMilliseconds: UInt64 = 700, capMilliseconds: UInt64 = 30_000
+        firstPublish: Duration = .seconds(3),
+        quiet: Duration = .milliseconds(700), cap: Duration = .seconds(30)
     ) async throws -> [LSPDiagnostic] {
         let key = try await syncDocument(path: path, text: text)
         if prepareIndex { try await waitForIndex() }
-        return await diagnosticsAfterSettling(
-            key: key, quietMilliseconds: quietMilliseconds, capMilliseconds: capMilliseconds)
+        return await diagnosticsAfterSettling(key: key, firstPublish: firstPublish, quiet: quiet, cap: cap)
     }
 
     /// Poll for `publishDiagnostics` activity on `key` until it goes quiet (no new
-    /// publish for `quietMilliseconds`) after at least one has arrived, or `cap` is
-    /// hit. Push diagnostics have no "final" signal, so a settle is the honest wait.
+    /// publish for `quiet`) after at least one has arrived, or `cap` is hit. Push
+    /// diagnostics have no "final" signal, so a settle is the honest wait. If no
+    /// publish arrives at all within `firstPublish`, give up early — the server is
+    /// staying silent for this document.
     private func diagnosticsAfterSettling(
-        key: String, quietMilliseconds: UInt64, capMilliseconds: UInt64
+        key: String, firstPublish: Duration, quiet: Duration, cap: Duration
     ) async -> [LSPDiagnostic] {
-        let step: UInt64 = 200
-        var elapsed: UInt64 = 0
-        var quiet: UInt64 = 0
+        let step: Duration = .milliseconds(200)
+        var elapsed: Duration = .zero
+        var quietFor: Duration = .zero
         var lastCount = diagnosticsPublishCount[key] ?? 0
         var sawPublish = latestDiagnostics[key] != nil
-        while elapsed < capMilliseconds {
-            try? await Task.sleep(nanoseconds: step * 1_000_000)
+        while elapsed < cap {
+            try? await Task.sleep(for: step)
             elapsed += step
             let count = diagnosticsPublishCount[key] ?? 0
             if count != lastCount {
                 lastCount = count
                 sawPublish = true
-                quiet = 0
+                quietFor = .zero
             } else if sawPublish {
-                quiet += step
-                if quiet >= quietMilliseconds { break }
+                quietFor += step
+                if quietFor >= quiet { break }
+            } else if elapsed >= firstPublish {
+                break
             }
         }
         return latestDiagnostics[key] ?? []
@@ -357,7 +374,7 @@ public actor LSPClient {
 
     /// Normalize a `definition`/`references` result (`Location` | `Location[]` |
     /// `LocationLink[]` | `null`) into a flat `[LSPLocation]`.
-    private static func locations(from result: JSONValue) -> [LSPLocation] {
+    static func locations(from result: JSONValue) -> [LSPLocation] {
         if case .null = result { return [] }
         if let single = try? result.decoded(LSPLocation.self) { return [single] }
         if let many = try? result.decoded([LSPLocation].self) { return many }

@@ -1,6 +1,6 @@
 import Foundation
 
-// The slice of the LSP 3.17 type system the POC needs: positions/ranges, the
+// The slice of the LSP 3.17 type system LSPKit speaks: positions/ranges, the
 // lifecycle `initialize` result, and the payloads of the interrogation methods
 // (`documentSymbol`, `hover`, `definition`, `references`). They are plain
 // `Codable` value types; the wire (de)serialization is JSONFoundation's
@@ -63,7 +63,10 @@ public struct LSPDocumentSymbol: Codable, Sendable {
     public var name: String
     public var detail: String?
     public var kind: Int
+    /// The whole declaration, body and doc comment included — what an editor folds.
     public var range: LSPRange
+    /// Just the symbol's name token, always contained in ``range`` — the position
+    /// to feed `hover`/`definition` so they land on the symbol itself.
     public var selectionRange: LSPRange
     public var children: [LSPDocumentSymbol]?
 
@@ -254,8 +257,8 @@ extension LSPProgress: Decodable {
 /// `initialize` result: what the server can do, and who it is.
 public struct LSPInitializeResult: Sendable {
     /// The names of the capabilities the server advertised (e.g.
-    /// `documentSymbolProvider`, `hoverProvider`), sorted — enough for the POC to
-    /// confirm the handshake and report features.
+    /// `documentSymbolProvider`, `hoverProvider`), sorted — enough to confirm the
+    /// handshake and report what the server can do.
     public var capabilityNames: [String]
     /// The server's self-reported name and version, when provided.
     public var serverName: String?

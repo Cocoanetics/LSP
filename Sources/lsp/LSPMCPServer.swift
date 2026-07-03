@@ -9,6 +9,8 @@ import SwiftMCP
 ///
 /// Positions are **1-based** here (line 1 = first line, column 1 = first character),
 /// matching what an editor shows; they're converted to LSP's 0-based internally.
+// The macro takes the version's *source text*, so it must be a string literal —
+// keep it in sync with `lspVersion` (LSPCommand.swift).
 @MCPServer(name: "lsp", version: "0.1.0")
 actor LSPMCPServer {
     private let session: LSPSession
@@ -60,25 +62,21 @@ actor LSPMCPServer {
     /// - Parameter query: The symbol name to look up.
     /// - Parameter scope: Which sources to search (default: the project's own sources).
     /// - Parameter exact: When true, only symbols whose name is exactly `query`.
-    /// - Parameter includeDocumentation: When true, include the full doc comment, not just the signature.
+    /// - Parameter includeDocumentation: When true, also return the symbol's doc comment (the `documentation` field, separate from the signature).
     @MCPTool
     func declaration(
         query: String, scope: LSPSymbolScope = .project, exact: Bool = false, includeDocumentation: Bool = false
     ) async throws -> [DeclarationMatch] {
         let client = try await session.client()
         let matches = try await searchSymbols(query: query, scope: scope, exact: exact)
-        var results: [DeclarationMatch] = []
-        for symbol in matches {
-            guard let path = LSPURI.path(symbol.location.uri) else { continue }
-            _ = try? await client.syncDocument(path: path)
-            let start = symbol.location.range.start
-            let hover = try? await client.hover(path: path, line: start.line, character: start.character)
-            results.append(DeclarationMatch(
-                symbol,
+        return await declarationHovers(for: matches, client: client).map { match, hover in
+            DeclarationMatch(
+                match,
                 signature: hover.map { lspSignature(fromHoverMarkdown: $0.value) },
-                documentation: includeDocumentation ? hover?.value : nil))
+                documentation: includeDocumentation
+                    ? hover.flatMap { lspDocumentation(fromHoverMarkdown: $0.value) }
+                    : nil)
         }
-        return results
     }
 
     // MARK: - Position queries
@@ -87,7 +85,7 @@ actor LSPMCPServer {
     /// position in a file. Returns the rendered Markdown, or a note if there's none.
     /// - Parameter file: Path to the file (absolute, or relative to the project root).
     /// - Parameter line: 1-based line number.
-    /// - Parameter column: 1-based column number.
+    /// - Parameter column: 1-based column number (UTF-16 units, as an editor shows).
     @MCPTool
     func hover(file: String, line: Int, column: Int) async throws -> String {
         try await withIndexProgress {
@@ -100,7 +98,7 @@ actor LSPMCPServer {
     /// Find where the symbol at a position is defined.
     /// - Parameter file: Path to the file (absolute, or relative to the project root).
     /// - Parameter line: 1-based line number.
-    /// - Parameter column: 1-based column number.
+    /// - Parameter column: 1-based column number (UTF-16 units, as an editor shows).
     @MCPTool
     func definition(file: String, line: Int, column: Int) async throws -> [Location] {
         try await withIndexProgress {
@@ -109,16 +107,15 @@ actor LSPMCPServer {
         }
     }
 
-    /// Find all references to the symbol at a position (project-wide; depends on the
-    /// background index being ready).
+    /// Find all references to the symbol at a position, project-wide. Waits for
+    /// background indexing to finish before answering, so results are complete — the
+    /// first call on a cold project can take a while (and reports indexing progress).
     /// - Parameter file: Path to the file (absolute, or relative to the project root).
     /// - Parameter line: 1-based line number.
-    /// - Parameter column: 1-based column number.
+    /// - Parameter column: 1-based column number (UTF-16 units, as an editor shows).
     @MCPTool
     func references(file: String, line: Int, column: Int) async throws -> [Location] {
-        let client = try await session.client()
-        let path = await session.resolve(file)
-        try await client.syncDocument(path: path)
+        let (client, path) = try await openedClient(forFile: file)
         return try await withIndexProgress {
             try await client.waitForIndex()
             return try await client.references(path: path, line: line - 1, character: column - 1).map(Location.init)
@@ -149,14 +146,22 @@ actor LSPMCPServer {
               let mcpSession = Session.current else {
             return try await body()
         }
+        // One serial sender per request keeps the notifications in emission order —
+        // a Task per event would race, and the caller could see progress go backwards.
+        let (events, continuation) = AsyncStream.makeStream(of: (percent: Int, message: String?).self)
         let state = IndexProgressState()
         let sinkID = await session.addProgressSink { progress in
-            guard let (percent, message) = state.update(progress) else { return }
-            Task {
+            guard let update = state.update(progress) else { return }
+            continuation.yield((update.percent, update.message))
+        }
+        Task {
+            for await event in events {
                 await mcpSession.sendProgressNotification(
-                    progressToken: progressToken, progress: Double(percent), total: 100, message: message)
+                    progressToken: progressToken, progress: Double(event.percent), total: 100,
+                    message: event.message)
             }
         }
+        defer { continuation.finish() }
         do {
             let result = try await body()
             await session.removeProgressSink(sinkID)

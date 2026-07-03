@@ -4,9 +4,10 @@ import LSPKit
 extension LSPCommand {
     /// `lsp check <file>` — lint one file via LSP diagnostics: syntax *and* semantic
     /// errors from sourcekit-lsp's in-memory type-check, no full build needed.
-    /// `didOpen` hands the server the text; it pushes `publishDiagnostics` after
-    /// type-checking. We gate on `workspace/synchronize` so the target is prepared and
-    /// the semantic diagnostics are accurate, not just syntactic.
+    /// `LSPClient.diagnostics` opens the file, gates on `workspace/synchronize` (so
+    /// the target is prepared and the semantic diagnostics are accurate, not just
+    /// syntactic), and waits for the publish stream to settle — the same wait the
+    /// `check_file` MCP tool uses.
     struct Check: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "check",
@@ -22,37 +23,31 @@ extension LSPCommand {
         func run() async throws {
             let path = absolute(file)
             let root = enclosingProjectRoot(for: path)
+            let uri = LSPURI.file(path)
             let indexing = IndexingMonitor()
-            let collector = DiagnosticsCollector(targetPath: path)
 
             let diagnostics = try await LSPRunner.withClient(
                 root: root,
-                configure: { client in
-                    await client.setProgressHandler { indexing.handle($0) }
-                    await client.setDiagnosticsHandler { collector.record(uri: $0.uri, diagnostics: $0.diagnostics) }
-                }
+                configure: { client in await client.setProgressHandler { indexing.handle($0) } }
             ) { client in
-                try await client.didOpen(path: path)
-                // Prepare the target so semantic diagnostics resolve project symbols.
-                try await client.waitForIndex()
+                let published = try await client.diagnostics(forPath: path, prepareIndex: true)
                 indexing.finish()
-                await collector.waitForFirstPublish(fallbackMilliseconds: 3_000)
-                return collector.diagnostics.sorted {
+                return published.sorted {
                     ($0.range.start.line, $0.range.start.character) < ($1.range.start.line, $1.range.start.character)
                 }
             }
 
             if json {
-                printJSON(diagnostics.map { DiagnosticResult($0, root: root, uri: collector.targetURI) })
+                printJSON(diagnostics.map { DiagnosticResult($0, root: root, uri: uri) })
             } else if diagnostics.isEmpty {
                 print("no issues")
             } else {
                 for diagnostic in diagnostics {
-                    print(formatDiagnostic(diagnostic, root: root, uri: collector.targetURI))
+                    print(formatDiagnostic(diagnostic, root: root, uri: uri))
                 }
-                let errors = diagnostics.filter { $0.severity == 1 }.count
-                let warnings = diagnostics.filter { $0.severity == 2 }.count
-                print("\(errors) error\(errors == 1 ? "" : "s"), \(warnings) warning\(warnings == 1 ? "" : "s")")
+                let tally = diagnosticTally(diagnostics)
+                print("\(tally.errors) error\(tally.errors == 1 ? "" : "s"), "
+                    + "\(tally.warnings) warning\(tally.warnings == 1 ? "" : "s")")
             }
         }
     }

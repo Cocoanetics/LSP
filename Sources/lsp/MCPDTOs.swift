@@ -1,29 +1,43 @@
 import Foundation
 import LSPKit
+import SwiftMCP
 
 // JSON shapes the tools return to the MCP client. Positions are 1-based and paths
 // are absolute filesystem paths (unambiguous for the agent). Symbol kinds and
 // diagnostic severities are rendered as names, not raw LSP integers.
+//
+// `@Schema` (JSONFoundation, re-exported by SwiftMCP) makes each type
+// `SchemaRepresentable`, so the tools advertise a structured `outputSchema` built
+// from the doc comments below — the agent sees the field semantics up front.
 
 /// `check_file` result: the diagnostics plus a quick error/warning tally.
+@Schema
 struct CheckResult: Codable, Sendable {
+    /// The checked file, as an absolute path.
     var file: String
+    /// How many diagnostics are errors.
     var errors: Int
+    /// How many diagnostics are warnings.
     var warnings: Int
     var diagnostics: [DiagnosticItem]
 
     init(file: String, diagnostics: [LSPDiagnostic]) {
+        let tally = diagnosticTally(diagnostics)
         self.file = file
-        self.errors = diagnostics.filter { $0.severity == 1 }.count
-        self.warnings = diagnostics.filter { $0.severity == 2 }.count
+        self.errors = tally.errors
+        self.warnings = tally.warnings
         self.diagnostics = diagnostics.map(DiagnosticItem.init)
     }
 }
 
 /// One diagnostic at a 1-based position.
+@Schema
 struct DiagnosticItem: Codable, Sendable {
+    /// `error`, `warning`, `information`, or `hint`.
     var severity: String
+    /// 1-based line number.
     var line: Int
+    /// 1-based column number.
     var column: Int
     var message: String
 
@@ -36,12 +50,18 @@ struct DiagnosticItem: Codable, Sendable {
 }
 
 /// A `find_symbol` hit.
+@Schema
 struct SymbolMatch: Codable, Sendable {
     var name: String
+    /// The symbol kind as a name (`class`, `function`, …).
     var kind: String
+    /// The enclosing symbol (a type, extension, or file), when the server reports one.
     var containerName: String?
+    /// Absolute filesystem path to the declaring file.
     var path: String
+    /// 1-based line number.
     var line: Int
+    /// 1-based column number.
     var column: Int
 
     init(_ symbol: LSPSymbolInformation) {
@@ -56,14 +76,22 @@ struct SymbolMatch: Codable, Sendable {
 }
 
 /// A `declaration` hit: the symbol plus its resolved declaration text.
+@Schema
 struct DeclarationMatch: Codable, Sendable {
     var name: String
+    /// The symbol kind as a name (`class`, `function`, …).
     var kind: String
+    /// The enclosing symbol (a type, extension, or file), when the server reports one.
     var containerName: String?
+    /// Absolute filesystem path to the declaring file.
     var path: String
+    /// 1-based line number.
     var line: Int
+    /// 1-based column number.
     var column: Int
+    /// The declaration signature (the hover's fenced code block).
     var signature: String?
+    /// The doc-comment prose, when requested and present.
     var documentation: String?
 
     init(_ symbol: LSPSymbolInformation, signature: String?, documentation: String?) {
@@ -80,9 +108,13 @@ struct DeclarationMatch: Codable, Sendable {
 }
 
 /// A `file:line:column` location (1-based).
+@Schema
 struct Location: Codable, Sendable {
+    /// Absolute filesystem path.
     var path: String
+    /// 1-based line number.
     var line: Int
+    /// 1-based column number.
     var column: Int
 
     init(_ location: LSPLocation) {
@@ -94,6 +126,10 @@ struct Location: Codable, Sendable {
 }
 
 /// A node of the `document_symbols` hierarchy.
+///
+/// Deliberately *not* `@Schema`: the recursive `children` property would send the
+/// schema generator into unbounded recursion. `document_symbols` stays without an
+/// advertised output schema.
 struct SymbolNode: Codable, Sendable {
     var name: String
     var kind: String
@@ -111,4 +147,5 @@ struct SymbolNode: Codable, Sendable {
     }
 }
 
-// `severityName(_:)` is shared with the CLI commands (see Support/Output.swift).
+// `severityName(_:)` and `diagnosticTally(_:)` are shared with the CLI commands
+// (see Support/Output.swift).

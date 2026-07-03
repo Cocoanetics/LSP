@@ -40,7 +40,9 @@ parse source itself.
 
 ## Requirements
 
-- **macOS 14+** and a **Swift 6.1** toolchain.
+- **macOS 14+** and a **Swift 6.3** toolchain (**Xcode 26.4** or newer) to build.
+  (Older SwiftPMs mishandle a trait-conditioned dependency deep in SwiftMCP's
+  graph — see the note in [`Package.swift`](Package.swift).)
 - `sourcekit-lsp`, resolved through `xcrun` — i.e. an installed **Xcode** or Command
   Line Tools. (Other servers work too — see [Other language servers](#other-language-servers).)
 
@@ -83,14 +85,16 @@ lsp mcp         .                        # run as an MCP server over stdio (see 
 | `definition <file> <line> <col>` | Where the symbol at a position is defined. | |
 | `references <file> <line> <col>` | Every use of the symbol at a position, project-wide. | |
 | `capabilities <file-or-dir>` | Print the server's advertised capabilities. | |
-| `mcp [dir]` | Run as an MCP server (stdio, or HTTP+SSE). | `--http-port`, `--http-host`, `--token` |
+| `mcp [dir]` | Run as an MCP server (stdio, or HTTP). | `--http-port`, `--http-host`, `--token` |
 
-**Positions in the CLI are 0-based**, and the column is a **UTF-16** code-unit offset
-— the LSP convention. (The MCP tools below are 1-based, matching what an editor shows.)
+**Position *arguments* are 0-based**, and the column is a **UTF-16** code-unit offset
+— the LSP convention. Printed locations (`path:line:col`) and `check --json` are
+**1-based**, matching what an editor shows; `where --json`/`decl --json` embed raw
+(0-based) LSP ranges. (The MCP tools below are 1-based throughout.)
 
-`where`/`decl`/`references` depend on `sourcekit-lsp`'s **background index**; a
-progress bar is shown on stderr while it builds, so `--json` on stdout stays clean and
-pipeable.
+`where`/`decl`/`check`/`references` depend on `sourcekit-lsp`'s **background index**;
+a progress bar is shown on stderr while it builds, so `--json` on stdout stays clean
+and pipeable.
 
 ---
 
@@ -120,10 +124,14 @@ During development you can skip the build step and let SwiftPM run it (this repo
     "command": "swift", "args": ["run", "lsp", "mcp", "."] } } }
 ```
 
-### HTTP+SSE
+One caveat: on a fresh clone, `swift run` first builds the whole dependency graph —
+longer than most MCP clients' startup timeout. Run `swift build` once before the
+first launch; after that the warm rebuild is fast enough.
+
+### HTTP
 
 For a long-running server that outward clients connect to (rather than launch), pass
-`--http-port` to serve over HTTP+SSE instead of stdio — the same shape SwiftACP's
+`--http-port` to serve over HTTP instead of stdio — the same shape SwiftACP's
 `acpxd` and the SwiftMCP demo expose:
 
 ```sh
@@ -134,7 +142,7 @@ lsp mcp /path/to/project --http-port 8080 --http-host 0.0.0.0  # expose beyond l
 
 | Option | Meaning |
 | --- | --- |
-| `--http-port <port>` | Serve over HTTP+SSE on this port instead of stdio. The MCP endpoint is `/<host>:<port>/mcp`. |
+| `--http-port <port>` | Serve over HTTP on this port instead of stdio. The MCP endpoint is `http://<host>:<port>/mcp` (streamable HTTP); legacy SSE clients can use `/sse`. |
 | `--http-host <host>` | Bind address. Defaults to `127.0.0.1` (loopback); pass `0.0.0.0` only if you intend it to be reachable from other machines. |
 | `--token <token>` | Require this bearer token on every request. **Omitted ⇒ unauthenticated** — fine on loopback, risky when combined with `--http-host 0.0.0.0`. |
 

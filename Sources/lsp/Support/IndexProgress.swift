@@ -2,8 +2,8 @@ import Foundation
 import LSPKit
 
 /// Translates `sourcekit-lsp`'s background-indexing `$/progress` stream into a
-/// `(percent, message)` to report, tracking the "Indexing" token across its
-/// `begin` → `report`* → `end` sequence.
+/// `(stage, percent, message)` to report, tracking the "Indexing" token across
+/// its `begin` → `report`* → `end` sequence.
 ///
 /// Two consumers share it: the `lsp` CLI's `IndexingMonitor` renders the signal as
 /// a stderr bar; the MCP server bridges it to a caller's progress token. One state
@@ -12,19 +12,19 @@ final class IndexProgressState: @unchecked Sendable {
     private let lock = NSLock()
     private var indexingToken: String?
 
-    /// Map one `$/progress` event to the progress to report, or `nil` to skip it
-    /// (non-indexing tokens, or the indeterminate "Determining files" lead-in).
-    func update(_ progress: LSPProgress) -> (percent: Int, message: String?)? {
+    /// Map one `$/progress` event to the stage and progress to report, or `nil` to
+    /// skip it (non-indexing tokens, or reports that precede the `begin`).
+    func update(_ progress: LSPProgress) -> (stage: LSPProgress.Stage, percent: Int, message: String?)? {
         lock.lock(); defer { lock.unlock() }
         switch progress.stage {
         case .begin where progress.title?.hasPrefix("Indexing") == true:
             indexingToken = progress.token
-            return (percent(of: progress), progress.message)
+            return (.begin, percent(of: progress), progress.message)
         case .report where progress.token == indexingToken:
-            return (percent(of: progress), progress.message)
+            return (.report, percent(of: progress), progress.message)
         case .end where progress.token == indexingToken:
             indexingToken = nil
-            return (100, progress.message)
+            return (.end, 100, progress.message)
         default:
             return nil // other tokens (package reload, …) and pre-begin reports.
         }
