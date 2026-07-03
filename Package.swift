@@ -1,21 +1,12 @@
 // swift-tools-version: 6.1
 import PackageDescription
 
-// Not imported anywhere — a resolver hint, and only for Swift 6.3 toolchains.
-// SwiftMCP reaches swift-subprocess purely through trait-conditioned edges
-// (`Client` → JSONFoundation's `Subprocess`): SwiftPM 6.2 prunes the package
-// from the graph entirely (and errors on its product if it *is* named here),
-// while SwiftPM 6.3 fails resolution unless it is named at the top level
-// ("exhausted attempts…"). Drop this once SwiftPM handles trait-conditioned
-// dependencies consistently again.
-let subprocessResolverHint: [Package.Dependency]
-#if compiler(>=6.3)
-subprocessResolverHint = [
-    .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "0.5.0")
-]
-#else
-subprocessResolverHint = []
-#endif
+// Building this package needs a Swift 6.3+ toolchain (Xcode 26.4+). SwiftMCP
+// reaches swift-subprocess purely through trait-conditioned edges (`Client` →
+// JSONFoundation's `Subprocess`), and SwiftPM 6.2 cannot see a trait-gated
+// product that deep in the graph — it fails with "product 'Subprocess' … not
+// found" whatever this manifest declares. SwiftPM 6.3 resolves it, but only
+// with the swift-subprocess resolver hint below.
 
 // LSPKit drives a Language Server (starting with `sourcekit-lsp`) from Swift over
 // JSON-RPC, and exposes it as a CLI and an MCP server (`lsp` / `lsp mcp`) — the
@@ -66,8 +57,13 @@ let package = Package(
         // `StreamLogHandler.standardError`, which `lsp mcp` bootstraps.
         .package(url: "https://github.com/apple/swift-log.git", from: "1.1.0"),
         // The CLI is structured as swift-argument-parser subcommands.
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0")
-    ] + subprocessResolverHint,
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
+        // Not imported anywhere — a resolver hint. SwiftPM 6.3 fails to resolve
+        // swift-subprocess along SwiftMCP's trait-conditioned edges ("exhausted
+        // attempts…") unless it is also named at the top level. Drop this once
+        // SwiftPM resolves trait-conditioned dependencies on its own again.
+        .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "0.5.0")
+    ],
     targets: [
         .target(
             name: "LSPKit",

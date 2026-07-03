@@ -40,7 +40,9 @@ parse source itself.
 
 ## Requirements
 
-- **macOS 14+** and a **Swift 6.1** toolchain.
+- **macOS 14+** and a **Swift 6.3** toolchain (**Xcode 26.4** or newer) to build.
+  (Older SwiftPMs mishandle a trait-conditioned dependency deep in SwiftMCP's
+  graph — see the note in [`Package.swift`](Package.swift).)
 - `sourcekit-lsp`, resolved through `xcrun` — i.e. an installed **Xcode** or Command
   Line Tools. (Other servers work too — see [Other language servers](#other-language-servers).)
 
@@ -121,6 +123,10 @@ During development you can skip the build step and let SwiftPM run it (this repo
 { "mcpServers": { "lsp": { "type": "stdio",
     "command": "swift", "args": ["run", "lsp", "mcp", "."] } } }
 ```
+
+One caveat: on a fresh clone, `swift run` first builds the whole dependency graph —
+longer than most MCP clients' startup timeout. Run `swift build` once before the
+first launch; after that the warm rebuild is fast enough.
 
 ### HTTP
 
