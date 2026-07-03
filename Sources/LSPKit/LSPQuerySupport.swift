@@ -1,8 +1,8 @@
 import Foundation
 
-// Small, server-agnostic helpers shared by the `lsp` CLI and the `lsp-mcp` server:
+// Small, server-agnostic helpers shared by the `lsp` CLI and the `lsp mcp` server:
 // narrowing fuzzy `workspace/symbol` results, exact-name matching, and pulling a
-// declaration signature out of hover markdown.
+// declaration signature (or its documentation) out of hover markdown.
 
 /// Which symbols a search should surface — the analogue of Xcode's Find scope
 /// (Project / Package Dependencies / both). A symbol's `file://` location decides:
@@ -12,16 +12,6 @@ public enum LSPSymbolScope: String, Sendable, CaseIterable {
     case project
     case dependencies
     case all
-
-    /// Parse a user-facing flag value (`project`/`deps`/`all`, with a few aliases).
-    public init?(flag: String) {
-        switch flag.lowercased() {
-        case "project", "proj":             self = .project
-        case "deps", "dependencies", "dep": self = .dependencies
-        case "all", "both":                 self = .all
-        default:                            return nil
-        }
-    }
 
     /// Whether a symbol at `uri` falls in this scope.
     public func includes(uri: String) -> Bool {
@@ -72,4 +62,23 @@ public func lspSignature(fromHoverMarkdown markdown: String) -> String {
     return collected.isEmpty
         ? markdown.trimmingCharacters(in: .whitespacesAndNewlines)
         : collected.joined(separator: "\n")
+}
+
+/// The counterpart of ``lspSignature(fromHoverMarkdown:)``: everything *after* the
+/// first fenced code block — the doc-comment prose — or `nil` when the hover is
+/// signature-only. (sourcekit-lsp renders hovers as the fenced signature followed
+/// by the documentation; any prose before the first fence is not preserved.)
+public func lspDocumentation(fromHoverMarkdown markdown: String) -> String? {
+    var inFirstFence = false
+    var passedFirstFence = false
+    var collected: [Substring] = []
+    for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+        if passedFirstFence {
+            collected.append(line)
+        } else if line.hasPrefix("```") {
+            if inFirstFence { passedFirstFence = true } else { inFirstFence = true }
+        }
+    }
+    let text = collected.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    return text.isEmpty ? nil : text
 }

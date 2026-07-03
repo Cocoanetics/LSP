@@ -60,7 +60,7 @@ extension LSPCommand {
                             containerName: match.containerName,
                             location: match.location,
                             signature: hover.map { lspSignature(fromHoverMarkdown: $0.value) },
-                            documentation: hover?.value))
+                            documentation: hover.flatMap { lspDocumentation(fromHoverMarkdown: $0.value) }))
                         continue
                     }
 

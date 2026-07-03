@@ -16,8 +16,9 @@ extension LSPCommand {
     ///   { "mcpServers": { "lsp": { "type": "stdio",
     ///       "command": "/path/to/lsp", "args": ["mcp", "/path/to/project"] } } }
     ///
-    /// - **HTTP+SSE** (`--http-port 8080`) — a long-running server outward clients
-    ///   connect to at `http://<host>:<port>/sse`, the same shape SwiftACP's `acpxd`
+    /// - **HTTP** (`--http-port 8080`) — a long-running server outward clients
+    ///   connect to at `http://<host>:<port>/mcp` (streamable HTTP; the legacy SSE
+    ///   endpoint stays available at `/sse`), the same shape SwiftACP's `acpxd`
     ///   and the SwiftMCP demo expose.
     ///
     /// Blocks, serving until the transport closes or a signal (SIGINT/SIGTERM) arrives;
@@ -25,22 +26,22 @@ extension LSPCommand {
     struct MCP: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "mcp",
-            abstract: "Run as an MCP server (stdio, or HTTP+SSE with --http-port)."
+            abstract: "Run as an MCP server (stdio, or HTTP with --http-port)."
         )
 
         @Argument(help: "Project directory (default: current).")
         var projectDir: String?
 
         @Option(name: .customLong("http-port"),
-                help: "Serve over HTTP+SSE on this port instead of stdio.")
+                help: "Serve over HTTP on this port instead of stdio.")
         var httpPort: Int?
 
         @Option(name: .customLong("http-host"),
-                help: "Bind address for HTTP+SSE (loopback by default; pass 0.0.0.0 to expose).")
+                help: "Bind address for HTTP (loopback by default; pass 0.0.0.0 to expose).")
         var httpHost: String = "127.0.0.1"
 
         @Option(name: .customLong("token"),
-                help: "Require this bearer token for HTTP+SSE requests (unauthenticated if omitted).")
+                help: "Require this bearer token for HTTP requests (unauthenticated if omitted).")
         var token: String?
 
         func run() async throws {
@@ -66,9 +67,10 @@ extension LSPCommand {
                     }
                 }
                 transports = [http]
-                logger.notice("lsp mcp serving over HTTP+SSE", metadata: [
+                logger.notice("lsp mcp serving over HTTP", metadata: [
                     "root": .string(root),
-                    "endpoint": .string("http://\(httpHost):\(httpPort)/sse"),
+                    "endpoint": .string("http://\(httpHost):\(httpPort)/mcp"),
+                    "legacySSE": .string("http://\(httpHost):\(httpPort)/sse"),
                     "auth": .string(token == nil ? "none" : "bearer")
                 ])
             } else {

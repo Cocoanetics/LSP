@@ -1,0 +1,33 @@
+---
+name: Swift
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+
+  build-macos:
+    # Not macos-latest: that pool currently mixes macOS 15 and 26 images, and on
+    # macOS 15 test bundles built by Xcode 26's Swift fail to dlopen
+    # (@rpath/libswiftCompatibilitySpan.dylib); the macOS 26 runtime ships it.
+    # (Same pinning as JSONFoundation's CI.)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Select Xcode 26.0
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.0"
+      - name: Verify Swift version
+        run: swift --version
+      - name: Build (macOS)
+        run: swift build --build-tests -v
+      # Xcode on the runner ships sourcekit-lsp, so the live round-trip test runs
+      # here too (it reports as skipped where the toolchain is absent).
+      - name: Test (macOS)
+        run: swift test -v --skip-build

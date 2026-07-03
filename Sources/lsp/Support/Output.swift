@@ -42,6 +42,18 @@ func severityName(_ severity: Int?) -> String {
     }
 }
 
+/// Count errors and warnings in one pass — the tally both `lsp check` and the
+/// `check_file` MCP tool report.
+func diagnosticTally(_ diagnostics: [LSPDiagnostic]) -> (errors: Int, warnings: Int) {
+    diagnostics.reduce(into: (errors: 0, warnings: 0)) { tally, diagnostic in
+        switch severityName(diagnostic.severity) {
+        case "error":   tally.errors += 1
+        case "warning": tally.warnings += 1
+        default:        break
+        }
+    }
+}
+
 /// A human-friendly short path for a `file://` URI: project files relative to `root`
 /// (`Sources/LSPKit/LSPClient.swift`); dependency files as `<package>/…` by stripping
 /// the SwiftPM `…/checkouts/` prefix (`swift-nio/Sources/NIO/…`). Else left absolute.
@@ -59,9 +71,13 @@ func shorten(_ uri: String, root: String) -> String {
 func printJSON<Value: Encodable>(_ value: Value) {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-    if let data = try? encoder.encode(value), let text = String(data: data, encoding: .utf8) {
-        print(text)
-    } else {
+    do {
+        let data = try encoder.encode(value)
+        print(String(decoding: data, as: UTF8.self))
+    } catch {
+        // Should be unreachable for our plain value types — but if it happens,
+        // say so on stderr instead of silently emitting a wrong result.
+        FileHandle.standardError.write(Data("json encoding failed: \(error)\n".utf8))
         print("[]")
     }
 }

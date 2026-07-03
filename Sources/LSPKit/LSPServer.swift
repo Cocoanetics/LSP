@@ -7,8 +7,9 @@ import JSONRPCWire
 /// so swapping `sourcekit-lsp` for `clangd`/`pyright` is just a different command.
 public enum LSPServer {
     /// `sourcekit-lsp`, launched via `xcrun` so it resolves against the active
-    /// Xcode toolchain. Its logs (stderr) are discarded to keep stdout pure
-    /// JSON-RPC — the same discipline `probe.py` follows.
+    /// Xcode toolchain. By default its logs (stderr) are discarded to keep stdout
+    /// pure JSON-RPC — the same discipline `probe.py` follows; pass
+    /// `inheritStderr: true` to see them (debugging the server itself).
     public static func sourceKit(inheritStderr: Bool = false) -> ProcessLaunch {
         ProcessLaunch(
             executable: "xcrun",
@@ -24,6 +25,8 @@ public enum LSPServer {
     }
 }
 
+/// Filesystem path ⇄ `file://` URI conversion — LSP payloads speak URIs, callers
+/// speak paths.
 public enum LSPURI {
     /// A `file://` URI for a filesystem path, percent-encoding as needed. The path
     /// is resolved to absolute first (LSP requires absolute `file://` URIs).
@@ -39,7 +42,7 @@ public enum LSPURI {
 }
 
 /// Maps a file extension to the LSP `languageId` a server expects in `didOpen`.
-/// Defaults to `swift` — the POC's focus — for unknown extensions.
+/// Defaults to `swift` — the primary target — for unknown extensions.
 public func lspLanguageId(forPath path: String) -> String {
     switch (path as NSString).pathExtension.lowercased() {
     case "swift": return "swift"
@@ -54,21 +57,23 @@ public func lspLanguageId(forPath path: String) -> String {
 }
 
 /// Walks up from `path` to the nearest directory containing `Package.swift`
-/// (a Swift package root), falling back to the file's own directory. Used as the
-/// `rootUri` for `initialize` so `sourcekit-lsp` indexes the right project.
+/// (a Swift package root), falling back to the file's own directory (or the
+/// directory itself, for a directory input). Used as the `rootUri` for
+/// `initialize` so `sourcekit-lsp` indexes the right project.
 public func enclosingProjectRoot(for path: String) -> String {
     let absolute = (path as NSString).expandingTildeInPath
-    var directory = (absolute as NSString).isDirectory
+    let start = (absolute as NSString).isDirectory
         ? absolute
         : (absolute as NSString).deletingLastPathComponent
     let fileManager = FileManager.default
+    var directory = start
     while directory != "/" && !directory.isEmpty {
         if fileManager.fileExists(atPath: (directory as NSString).appendingPathComponent("Package.swift")) {
             return directory
         }
         directory = (directory as NSString).deletingLastPathComponent
     }
-    return (absolute as NSString).deletingLastPathComponent
+    return start
 }
 
 private extension NSString {
