@@ -1,6 +1,22 @@
 // swift-tools-version: 6.1
 import PackageDescription
 
+// Not imported anywhere — a resolver hint, and only for Swift 6.3 toolchains.
+// SwiftMCP reaches swift-subprocess purely through trait-conditioned edges
+// (`Client` → JSONFoundation's `Subprocess`): SwiftPM 6.2 prunes the package
+// from the graph entirely (and errors on its product if it *is* named here),
+// while SwiftPM 6.3 fails resolution unless it is named at the top level
+// ("exhausted attempts…"). Drop this once SwiftPM handles trait-conditioned
+// dependencies consistently again.
+let subprocessResolverHint: [Package.Dependency]
+#if compiler(>=6.3)
+subprocessResolverHint = [
+    .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "0.5.0")
+]
+#else
+subprocessResolverHint = []
+#endif
+
 // LSPKit drives a Language Server (starting with `sourcekit-lsp`) from Swift over
 // JSON-RPC, and exposes it as a CLI and an MCP server (`lsp` / `lsp mcp`) — the
 // same shape SwiftACP gives ACP.
@@ -46,18 +62,12 @@ let package = Package(
         // use, but the default `Client` trait must stay on: the `@MCPServer` macro
         // expands a nested `Client` type that references `MCPServerProxy`.)
         .package(url: "https://github.com/Cocoanetics/SwiftMCP.git", from: "1.9.0"),
-        // Not imported here — a resolver hint. SwiftMCP reaches swift-subprocess
-        // only through trait-conditioned edges (`Client` → JSONFoundation's
-        // `Subprocess`), and SwiftPM 6.3 fails to resolve it along that path
-        // ("exhausted attempts…"); naming it at the top level sidesteps that.
-        // Drop this once SwiftPM resolves trait-conditioned dependencies again.
-        .package(url: "https://github.com/swiftlang/swift-subprocess.git", from: "0.5.0"),
         // `serve(over:logger:)` takes a swift-log `Logger`; 1.1.0 is the floor for
         // `StreamLogHandler.standardError`, which `lsp mcp` bootstraps.
         .package(url: "https://github.com/apple/swift-log.git", from: "1.1.0"),
         // The CLI is structured as swift-argument-parser subcommands.
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0")
-    ],
+    ] + subprocessResolverHint,
     targets: [
         .target(
             name: "LSPKit",
