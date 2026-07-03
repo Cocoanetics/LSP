@@ -14,3 +14,24 @@ func searchAfterIndexing(
     indexing.finish() // clear any bar the final `$/progress` didn't.
     return lspFilterSymbols(try await client.workspaceSymbol(query), query: query, scope: scope, exact: exact)
 }
+
+/// Resolve symbol matches to their declaration hovers: each match's file is synced
+/// once (hover answers against the in-memory document), then `hover` is asked at the
+/// match's selection start. Matches without a `file://` location are dropped. Shared
+/// by `lsp decl` and the MCP `declaration` tool, which differ only in rendering.
+func declarationHovers(
+    for matches: [LSPSymbolInformation], client: LSPClient
+) async -> [(match: LSPSymbolInformation, hover: LSPHover?)] {
+    var syncedFiles: Set<String> = []
+    var resolved: [(match: LSPSymbolInformation, hover: LSPHover?)] = []
+    for match in matches {
+        guard let path = LSPURI.path(match.location.uri) else { continue }
+        if syncedFiles.insert(path).inserted {
+            _ = try? await client.syncDocument(path: path)
+        }
+        let start = match.location.range.start
+        let hover = (try? await client.hover(path: path, line: start.line, character: start.character)) ?? nil
+        resolved.append((match, hover))
+    }
+    return resolved
+}

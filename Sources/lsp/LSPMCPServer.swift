@@ -69,20 +69,14 @@ actor LSPMCPServer {
     ) async throws -> [DeclarationMatch] {
         let client = try await session.client()
         let matches = try await searchSymbols(query: query, scope: scope, exact: exact)
-        var results: [DeclarationMatch] = []
-        for symbol in matches {
-            guard let path = LSPURI.path(symbol.location.uri) else { continue }
-            _ = try? await client.syncDocument(path: path)
-            let start = symbol.location.range.start
-            let hover = try? await client.hover(path: path, line: start.line, character: start.character)
-            results.append(DeclarationMatch(
-                symbol,
+        return await declarationHovers(for: matches, client: client).map { match, hover in
+            DeclarationMatch(
+                match,
                 signature: hover.map { lspSignature(fromHoverMarkdown: $0.value) },
                 documentation: includeDocumentation
                     ? hover.flatMap { lspDocumentation(fromHoverMarkdown: $0.value) }
-                    : nil))
+                    : nil)
         }
-        return results
     }
 
     // MARK: - Position queries
